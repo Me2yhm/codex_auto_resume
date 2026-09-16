@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { AutoResumeController } from "./autoResumeController";
+import { diagnoseOfficialCodex } from "./diagnostics";
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("Codex Auto Resume");
@@ -12,6 +13,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("codexAutoResume.disable", () => controller.disable()),
     vscode.commands.registerCommand("codexAutoResume.status", () => controller.showStatus()),
     vscode.commands.registerCommand("codexAutoResume.resumeNow", () => controller.resumeNow()),
+    vscode.commands.registerCommand("codexAutoResume.diagnoseOfficialCodex", () => diagnoseOfficialCodex(output)),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("codexAutoResume")) {
         void controller.start();
