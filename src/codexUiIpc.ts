@@ -73,7 +73,7 @@ export function resolveCodexUiIpcSocketPath(): string {
 
 export class CodexUiIpcClient implements vscode.Disposable {
   private socket?: net.Socket;
-  private buffer = Buffer.alloc(0);
+  private buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   private clientId = INITIALIZING_CLIENT_ID;
   private readonly pending = new Map<string, PendingRequest>();
 
@@ -207,7 +207,7 @@ export class CodexUiIpcClient implements vscode.Disposable {
     });
   }
 
-  private onData(chunk: Buffer): void {
+  private onData(chunk: Buffer<ArrayBufferLike>): void {
     this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
     while (this.buffer.length >= 4) {
       const length = this.buffer.readUInt32LE(0);
