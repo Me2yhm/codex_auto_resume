@@ -19,6 +19,7 @@ export class AutoResumeController implements vscode.Disposable {
   private client?: CodexRpcClient;
   private timer?: NodeJS.Timeout;
   private running = false;
+  private lastObservation?: string;
   private statusBar: vscode.StatusBarItem;
 
   constructor(
@@ -36,14 +37,22 @@ export class AutoResumeController implements vscode.Disposable {
       this.renderStatus();
       return;
     }
-    await this.ensureClient();
+    // tick() owns client initialization and sets the re-entrancy guard before
+    // awaiting anything. This makes config-change + Enable races harmless.
     await this.tick();
   }
 
   async enable(): Promise<void> {
     await vscode.workspace.getConfiguration("codexAutoResume").update("enabled", true, vscode.ConfigurationTarget.Global);
     await this.start();
-    void vscode.window.showInformationMessage("Codex Auto Resume enabled.");
+    const armed = this.armed();
+    if (armed) {
+      void vscode.window.showInformationMessage(
+        `Codex Auto Resume enabled and armed for ${armed.threadId}. Resume after ${new Date(armed.resetAtMs).toLocaleString()}.`,
+      );
+    } else {
+      void vscode.window.showInformationMessage("Codex Auto Resume enabled.");
+    }
   }
 
   async disable(): Promise<void> {
@@ -199,11 +208,15 @@ export class AutoResumeController implements vscode.Disposable {
               this.output.appendLine(
                 `[auto-resume] quota still unavailable for ${armed.threadId}; next reset ${new Date(nextReset).toISOString()}`,
               );
+            } else {
+              this.output.appendLine(
+                `[auto-resume] quota is not confirmed available for ${armed.threadId}, but no future reset timestamp is currently visible; keeping it armed`,
+              );
             }
           }
         }
       } else {
-        const interrupted = await this.findInterruptedThread();
+        const interrupted = await this.findInterruptedThread(limits);
         if (interrupted) {
           const resetAtMs = this.computeResetAt(limits);
           if (resetAtMs) {
@@ -215,7 +228,13 @@ export class AutoResumeController implements vscode.Disposable {
               reason: interrupted.reason,
             };
             await this.context.workspaceState.update(STATE_KEY, record);
-            this.output.appendLine(`[auto-resume] armed thread ${record.threadId} until ${new Date(resetAtMs).toISOString()}`);
+            this.output.appendLine(
+              `[auto-resume] armed thread ${record.threadId}; reason=${record.reason}; resume after ${new Date(resetAtMs).toISOString()}`,
+            );
+          } else {
+            this.output.appendLine(
+              `[auto-resume] detected a quota interruption for ${interrupted.thread.id}, but no future reset timestamp is available yet; will retry`,
+            );
           }
         }
       }
@@ -255,9 +274,7 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   private async sendThroughOfficialUi(threadId: string, prompt: string, logPrefix: string): Promise<boolean> {
-    this.output.appendLine(`[${logPrefix}] opening official Codex sidebar before owner discovery`);
-    await vscode.commands.executeCommand("chatgpt.openSidebar");
-    await delay(1500);
+    await this.surfaceOfficialThread(threadId, logPrefix);
 
     const versions = readCodexUiIpcVersions(this.output);
     const ipc = new CodexUiIpcClient(this.output);
@@ -276,6 +293,39 @@ export class AutoResumeController implements vscode.Disposable {
     } finally {
       ipc.dispose();
     }
+  }
+
+  private async surfaceOfficialThread(threadId: string, logPrefix: string): Promise<void> {
+    this.output.appendLine(`[${logPrefix}] surfacing official Codex thread ${threadId}`);
+
+    // Recent official Codex builds accept a thread hint on openSidebar. Older
+    // builds simply ignore the argument, so this remains a safe first attempt.
+    try {
+      await vscode.commands.executeCommand("chatgpt.openSidebar", { threadId });
+    } catch (error) {
+      this.output.appendLine(
+        `[${logPrefix}] chatgpt.openSidebar(threadId) failed: ${(error as Error).message}; falling back to plain openSidebar`,
+      );
+      await vscode.commands.executeCommand("chatgpt.openSidebar");
+    }
+
+    // The official extension also exposes its conversation custom editor. It
+    // mounts the exact persisted thread in the current VS Code instance, which
+    // makes that thread eligible to answer UI-IPC owner discovery.
+    try {
+      const route = vscode.Uri.file(`/local/${threadId}`).with({
+        scheme: "openai-codex",
+        authority: "route",
+      });
+      await vscode.commands.executeCommand("vscode.openWith", route, "chatgpt.conversationEditor");
+      this.output.appendLine(`[${logPrefix}] mounted target thread through chatgpt.conversationEditor`);
+    } catch (error) {
+      this.output.appendLine(
+        `[${logPrefix}] exact-thread custom editor mount unavailable: ${(error as Error).message}; continuing with sidebar owner discovery`,
+      );
+    }
+
+    await delay(1500);
   }
 
   private scheduleNextTick(): void {
@@ -316,17 +366,61 @@ export class AutoResumeController implements vscode.Disposable {
     return false;
   }
 
-  private async findInterruptedThread(): Promise<{ thread: CodexThread; reason: ArmedResume["reason"] } | undefined> {
+  private async findInterruptedThread(
+    limits: RateLimitSnapshot | null,
+  ): Promise<{ thread: CodexThread; reason: ArmedResume["reason"] } | undefined> {
     const thread = await this.findMostRecentThread();
     if (!thread) return undefined;
 
     const ageMinutes = (Date.now() - thread.updatedAt * 1000) / 60_000;
-    const recentMinutes = Math.max(5, vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 180));
-    if (ageMinutes > recentMinutes) return undefined;
+    const recentMinutes = Math.max(
+      5,
+      vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 480),
+    );
+    if (ageMinutes > recentMinutes) {
+      this.output.appendLine(
+        `[auto-resume] latest workspace thread ${thread.id} is ${ageMinutes.toFixed(1)} minutes old, outside the ${recentMinutes}-minute arming window`,
+      );
+      return undefined;
+    }
 
     const latest = await this.latestTurn(thread.id);
-    const reason = classifyLimitError(latest);
-    return reason ? { thread, reason } : undefined;
+    this.logObservation(thread, latest, limits);
+
+    const explicitReason = classifyLimitError(latest);
+    if (explicitReason) return { thread, reason: explicitReason };
+
+    // A real quota stop can be persisted as an aborted/interrupted turn with
+    // error=null. Require independent account-level quota evidence so an
+    // ordinary user-initiated interrupt is never armed by status alone.
+    const interruptedWithoutStructuredError = latest?.status === "interrupted" || latest?.status === "failed";
+    if (interruptedWithoutStructuredError && this.quotaLooksBlocked(limits)) {
+      this.output.appendLine(
+        `[auto-resume] latest turn is ${latest?.status} without a structured usage-limit error, but account rate limits are blocked; treating it as a rate-limit interruption`,
+      );
+      return { thread, reason: "rateLimitReached" };
+    }
+
+    return undefined;
+  }
+
+  private logObservation(
+    thread: CodexThread,
+    turn: CodexTurn | undefined,
+    limits: RateLimitSnapshot | null,
+  ): void {
+    const observation = [
+      thread.id,
+      turn?.id ?? "none",
+      turn?.status ?? "none",
+      turn ? formatTurnError(turn) : "none",
+      formatRateLimits(limits),
+    ].join("|");
+    if (observation === this.lastObservation) return;
+    this.lastObservation = observation;
+    this.output.appendLine(
+      `[auto-resume] observed thread=${thread.id}; latestTurn=${turn?.id ?? "<none>"}; status=${turn?.status ?? "<none>"}; error=${turn ? formatTurnError(turn) : "none"}; ${formatRateLimits(limits)}`,
+    );
   }
 
   private async findMostRecentThread(): Promise<CodexThread | undefined> {
@@ -359,11 +453,22 @@ export class AutoResumeController implements vscode.Disposable {
     return future.length > 0 ? Math.min(...future) * 1000 : undefined;
   }
 
+  private quotaLooksBlocked(limits: RateLimitSnapshot | null): boolean {
+    if (!limits) return false;
+    if (limits.rateLimitReachedType) return true;
+    const windows = [limits.primary, limits.secondary].filter(
+      (window): window is NonNullable<typeof window> => Boolean(window),
+    );
+    return windows.some((window) => window.usedPercent >= 99);
+  }
+
   private quotaLooksAvailable(limits: RateLimitSnapshot | null): boolean {
-    if (!limits) return true;
+    if (!limits) return false;
     if (limits.rateLimitReachedType) return false;
-    const windows = [limits.primary, limits.secondary].filter((window): window is NonNullable<typeof window> => Boolean(window));
-    return windows.every((window) => window.usedPercent < 99);
+    const windows = [limits.primary, limits.secondary].filter(
+      (window): window is NonNullable<typeof window> => Boolean(window),
+    );
+    return windows.length > 0 && windows.every((window) => window.usedPercent < 99);
   }
 
   private resetGraceMs(): number {
@@ -401,6 +506,26 @@ function formatTurnError(turn: CodexTurn): string {
   if (typeof info === "string") return info;
   if (info) return JSON.stringify(info);
   return turn.error?.message ?? "none";
+}
+
+function formatRateLimits(limits: RateLimitSnapshot | null): string {
+  if (!limits) return "rateLimits=<none>";
+  return [
+    `rateLimitReachedType=${limits.rateLimitReachedType ?? "none"}`,
+    formatRateLimitWindow("primary", limits.primary),
+    formatRateLimitWindow("secondary", limits.secondary),
+  ].join("; ");
+}
+
+function formatRateLimitWindow(
+  name: string,
+  window: RateLimitSnapshot["primary"],
+): string {
+  if (!window) return `${name}=none`;
+  const reset = typeof window.resetsAt === "number"
+    ? new Date(window.resetsAt * 1000).toISOString()
+    : "none";
+  return `${name}=${window.usedPercent}% reset=${reset}`;
 }
 
 function delay(ms: number): Promise<void> {
