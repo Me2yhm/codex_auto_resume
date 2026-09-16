@@ -70,9 +70,22 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   async resumeNow(): Promise<void> {
-    void vscode.window.showWarningMessage(
-      "Automatic write is temporarily paused while the official Codex UI IPC path is being validated. Use 'Test Official UI IPC Bridge'.",
-    );
+    await this.ensureClient();
+    const thread = await this.findMostRecentThread();
+    if (!thread) throw new Error("No recent VS Code Codex thread found for the current workspace.");
+    const prompt = this.resumePrompt();
+    const before = await this.latestTurn(thread.id);
+    const success = await this.sendThroughOfficialUi(thread.id, prompt, "resume-now");
+    if (!success) {
+      void vscode.window.showWarningMessage(
+        "Codex Auto Resume could not find an active UI owner for this thread. Open that exact Codex conversation and try Resume Now again.",
+      );
+      return;
+    }
+    const verified = await this.verifyNewTurn(thread.id, before?.id, "resume-now");
+    if (verified) {
+      void vscode.window.showInformationMessage("Codex Auto Resume sent the continuation prompt to the same thread.");
+    }
   }
 
   async testOfficialSubmitBridge(): Promise<void> {
@@ -86,7 +99,6 @@ export class AutoResumeController implements vscode.Disposable {
     await this.ensureClient();
     const thread = await this.findMostRecentThread();
     if (!thread) throw new Error("No recent VS Code Codex thread found for the current workspace.");
-
     const before = await this.latestTurn(thread.id);
     const marker = `CODEX_AUTO_RESUME_BRIDGE_TEST_${Date.now()}`;
     const prompt = `${marker}\nThis is a transport smoke test. Reply exactly BRIDGE_OK and do not modify any files.`;
@@ -94,7 +106,6 @@ export class AutoResumeController implements vscode.Disposable {
     this.output.show(true);
     this.output.appendLine(`[bridge] target thread: ${thread.id}`);
     this.output.appendLine(`[bridge] latest turn before test: ${before?.id ?? "<none>"}`);
-
     await addTextToOfficialCodexThread(prompt, this.output);
     await delay(500);
     await tryNativeChatSubmit(this.output);
@@ -112,7 +123,6 @@ export class AutoResumeController implements vscode.Disposable {
     await this.ensureClient();
     const thread = await this.findMostRecentThread();
     if (!thread) throw new Error("No recent VS Code Codex thread found for the current workspace.");
-
     const before = await this.latestTurn(thread.id);
     const marker = `CODEX_AUTO_RESUME_UI_IPC_TEST_${Date.now()}`;
     const prompt = `${marker}\nThis is a transport smoke test. Reply exactly IPC_BRIDGE_OK and do not modify any files.`;
@@ -121,39 +131,15 @@ export class AutoResumeController implements vscode.Disposable {
     this.output.appendLine(`[ui-ipc-test] target thread: ${thread.id}`);
     this.output.appendLine(`[ui-ipc-test] latest turn before test: ${before?.id ?? "<none>"}`);
 
-    // Owner discovery only succeeds for a conversation that the official UI has mounted/rendered.
-    // Opening the sidebar wakes the official extension and often remounts its most recent thread.
-    this.output.appendLine("[ui-ipc-test] opening official Codex sidebar before owner discovery");
-    await vscode.commands.executeCommand("chatgpt.openSidebar");
-    await delay(1500);
-
-    const versions = readCodexUiIpcVersions(this.output);
-    const ipc = new CodexUiIpcClient(this.output);
-    let ownerClientId: string | undefined;
-    try {
-      await ipc.connect();
-      for (let attempt = 1; attempt <= 5; attempt += 1) {
-        ownerClientId = await ipc.discoverOwner(thread.id, versions.ownerDiscovery);
-        this.output.appendLine(
-          `[ui-ipc-test] owner discovery ${attempt}/5: ${ownerClientId ?? "<none>"}`,
-        );
-        if (ownerClientId) break;
-        await delay(1000);
-      }
-
-      if (!ownerClientId) {
-        this.output.appendLine(
-          "[ui-ipc-test] NO OWNER: the target thread is not currently claimable through Codex UI IPC. Open the exact interrupted conversation in the Codex sidebar, wait a few seconds, and run this test again.",
-        );
-        void vscode.window.showWarningMessage(
-          "No Codex UI IPC owner was found for the target thread. Open the exact interrupted conversation in the Codex sidebar, wait 2-3 seconds, then run the UI IPC bridge test again.",
-        );
-        return;
-      }
-
-      await ipc.startTurn(thread.id, prompt, versions, ownerClientId);
-    } finally {
-      ipc.dispose();
+    const sent = await this.sendThroughOfficialUi(thread.id, prompt, "ui-ipc-test");
+    if (!sent) {
+      this.output.appendLine(
+        "[ui-ipc-test] NO OWNER: open the exact target conversation in the Codex sidebar, wait a few seconds, and run this test again.",
+      );
+      void vscode.window.showWarningMessage(
+        "No Codex UI IPC owner was found for the target thread. Open the exact interrupted conversation in the Codex sidebar, wait 2-3 seconds, then run the UI IPC bridge test again.",
+      );
+      return;
     }
 
     const success = await this.verifyNewTurn(thread.id, before?.id, "ui-ipc-test");
@@ -178,6 +164,13 @@ export class AutoResumeController implements vscode.Disposable {
     return this.context.workspaceState.get<ArmedResume>(STATE_KEY);
   }
 
+  private resumePrompt(): string {
+    return vscode.workspace.getConfiguration("codexAutoResume").get<string>(
+      "resumePrompt",
+      "继续。从中断处恢复，先检查当前工作区已有修改和上一轮状态，不要重复已经完成的工作。",
+    );
+  }
+
   private async ensureClient(): Promise<void> {
     if (this.client?.isRunning) return;
     this.client?.dispose();
@@ -198,13 +191,14 @@ export class AutoResumeController implements vscode.Disposable {
       if (armed) {
         if (Date.now() >= armed.resetAtMs + this.resetGraceMs()) {
           if (this.quotaLooksAvailable(limits)) {
-            this.output.appendLine(
-              `[auto-resume] quota is available for thread ${armed.threadId}, but automatic write remains paused until the official UI IPC bridge is validated.`,
-            );
+            await this.tryAutomaticResume(armed);
           } else {
             const nextReset = this.computeResetAt(limits);
             if (nextReset) {
               await this.context.workspaceState.update(STATE_KEY, { ...armed, resetAtMs: nextReset });
+              this.output.appendLine(
+                `[auto-resume] quota still unavailable for ${armed.threadId}; next reset ${new Date(nextReset).toISOString()}`,
+              );
             }
           }
         }
@@ -233,6 +227,54 @@ export class AutoResumeController implements vscode.Disposable {
       this.running = false;
       this.renderStatus();
       this.scheduleNextTick();
+    }
+  }
+
+  private async tryAutomaticResume(armed: ArmedResume): Promise<void> {
+    const before = await this.latestTurn(armed.threadId);
+    this.output.appendLine(`[auto-resume] quota available; attempting UI IPC resume for ${armed.threadId}`);
+
+    const sent = await this.sendThroughOfficialUi(armed.threadId, this.resumePrompt(), "auto-resume");
+    if (!sent) {
+      this.output.appendLine(
+        `[auto-resume] no active UI owner for ${armed.threadId}; keeping thread armed and retrying on the next poll`,
+      );
+      return;
+    }
+
+    const verified = await this.verifyNewTurn(armed.threadId, before?.id, "auto-resume");
+    if (!verified) {
+      this.output.appendLine(
+        `[auto-resume] start-turn was accepted but no new turn was observed for ${armed.threadId}; keeping thread armed`,
+      );
+      return;
+    }
+
+    await this.context.workspaceState.update(STATE_KEY, undefined);
+    this.output.appendLine(`[auto-resume] resumed and disarmed thread ${armed.threadId}`);
+  }
+
+  private async sendThroughOfficialUi(threadId: string, prompt: string, logPrefix: string): Promise<boolean> {
+    this.output.appendLine(`[${logPrefix}] opening official Codex sidebar before owner discovery`);
+    await vscode.commands.executeCommand("chatgpt.openSidebar");
+    await delay(1500);
+
+    const versions = readCodexUiIpcVersions(this.output);
+    const ipc = new CodexUiIpcClient(this.output);
+    try {
+      await ipc.connect();
+      let ownerClientId: string | undefined;
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        ownerClientId = await ipc.discoverOwner(threadId, versions.ownerDiscovery);
+        this.output.appendLine(`[${logPrefix}] owner discovery ${attempt}/5: ${ownerClientId ?? "<none>"}`);
+        if (ownerClientId) break;
+        await delay(1000);
+      }
+      if (!ownerClientId) return false;
+      await ipc.startTurn(threadId, prompt, versions, ownerClientId);
+      return true;
+    } finally {
+      ipc.dispose();
     }
   }
 
@@ -270,7 +312,6 @@ export class AutoResumeController implements vscode.Disposable {
         return true;
       }
     }
-
     this.output.appendLine(`[${logPrefix}] FAILED: no new turn appeared on the target thread.`);
     return false;
   }
@@ -344,7 +385,7 @@ export class AutoResumeController implements vscode.Disposable {
     }
     const reset = new Date(armed.resetAtMs).toLocaleTimeString();
     this.statusBar.text = `$(clock) Codex Resume: ${reset}`;
-    this.statusBar.tooltip = `Thread ${armed.threadId} is armed; automatic write is paused until the official UI IPC bridge is validated`;
+    this.statusBar.tooltip = `Thread ${armed.threadId} is armed for automatic UI IPC resume`;
   }
 }
 
