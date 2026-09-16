@@ -14,6 +14,7 @@
     "onCommand:codexAutoResume.disable",
     "onCommand:codexAutoResume.status",
     "onCommand:codexAutoResume.resumeNow",
+    "onCommand:codexAutoResume.testOfficialSubmitBridge",
     "onCommand:codexAutoResume.diagnoseOfficialCodex"
   ],
   "main": "./dist/extension.js",
@@ -23,6 +24,7 @@
       { "command": "codexAutoResume.disable", "title": "Codex Auto Resume: Disable" },
       { "command": "codexAutoResume.status", "title": "Codex Auto Resume: Show Status" },
       { "command": "codexAutoResume.resumeNow", "title": "Codex Auto Resume: Resume Now" },
+      { "command": "codexAutoResume.testOfficialSubmitBridge", "title": "Codex Auto Resume: Test Official Submit Bridge" },
       { "command": "codexAutoResume.diagnoseOfficialCodex", "title": "Codex Auto Resume: Diagnose Official Codex Integration" }
     ],
     "configuration": {
