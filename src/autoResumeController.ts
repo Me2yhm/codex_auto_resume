@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
+import { addTextToOfficialCodexThread, tryNativeChatSubmit } from "./officialCodexBridge";
 import {
   ArmedResume,
   CodexThread,
@@ -68,10 +69,54 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   async resumeNow(): Promise<void> {
+    void vscode.window.showWarningMessage(
+      "Direct app-server resume is temporarily disabled because the official VS Code Codex process owns the active thread writer lock. Use the submit bridge smoke test while the replacement write path is being validated.",
+    );
+  }
+
+  async testOfficialSubmitBridge(): Promise<void> {
+    const confirmed = await vscode.window.showWarningMessage(
+      "This test will add a harmless prompt to the current Codex thread and invoke VS Code's native chat submit command. It may create one quota-failed test turn if your quota is still exhausted.",
+      { modal: true },
+      "Run Bridge Test",
+    );
+    if (confirmed !== "Run Bridge Test") return;
+
     await this.ensureClient();
-    const candidate = await this.findMostRecentThread();
-    if (!candidate) throw new Error("No recent VS Code Codex thread found for the current workspace.");
-    await this.resumeThread(candidate.id);
+    const thread = await this.findMostRecentThread();
+    if (!thread) {
+      throw new Error("No recent VS Code Codex thread found for the current workspace.");
+    }
+
+    const before = await this.latestTurn(thread.id);
+    const marker = `CODEX_AUTO_RESUME_BRIDGE_TEST_${Date.now()}`;
+    const prompt = `${marker}\nThis is a transport smoke test. Reply exactly BRIDGE_OK and do not modify any files.`;
+
+    this.output.show(true);
+    this.output.appendLine(`[bridge] target thread: ${thread.id}`);
+    this.output.appendLine(`[bridge] latest turn before test: ${before?.id ?? "<none>"}`);
+
+    await addTextToOfficialCodexThread(prompt, this.output);
+    await delay(500);
+    await tryNativeChatSubmit(this.output);
+
+    for (let attempt = 1; attempt <= 12; attempt += 1) {
+      await delay(1000);
+      const after = await this.latestTurn(thread.id);
+      this.output.appendLine(`[bridge] verification ${attempt}/12 latest turn: ${after?.id ?? "<none>"}`);
+      if (after?.id && after.id !== before?.id) {
+        this.output.appendLine(`[bridge] SUCCESS: a new turn appeared on the same thread (${after.id}).`);
+        void vscode.window.showInformationMessage(
+          "Codex submit bridge succeeded: a new turn appeared on the same VS Code Codex thread.",
+        );
+        return;
+      }
+    }
+
+    this.output.appendLine("[bridge] FAILED: no new turn appeared after chatgpt.addToThread + workbench.action.chat.submit.");
+    void vscode.window.showWarningMessage(
+      "Codex submit bridge test did not create a new turn. The native VS Code chat submit command likely does not target the Codex sidebar composer.",
+    );
   }
 
   dispose(): void {
@@ -108,8 +153,9 @@ export class AutoResumeController implements vscode.Disposable {
       if (armed) {
         if (Date.now() >= armed.resetAtMs + this.resetGraceMs()) {
           if (this.quotaLooksAvailable(limits)) {
-            await this.resumeThread(armed.threadId);
-            await this.context.workspaceState.update(STATE_KEY, undefined);
+            this.output.appendLine(
+              `[auto-resume] quota is available for thread ${armed.threadId}, but automatic write is paused until the official submit bridge is validated.`,
+            );
           } else {
             const nextReset = this.computeResetAt(limits);
             if (nextReset) {
@@ -157,6 +203,16 @@ export class AutoResumeController implements vscode.Disposable {
     return response.rateLimits ?? null;
   }
 
+  private async latestTurn(threadId: string): Promise<CodexTurn | undefined> {
+    const response = await this.client!.request<ThreadTurnsListResponse>("thread/turns/list", {
+      threadId,
+      limit: 1,
+      sortDirection: "desc",
+      itemsView: "summary",
+    });
+    return response.data[0];
+  }
+
   private async findInterruptedThread(): Promise<{ thread: CodexThread; reason: ArmedResume["reason"] } | undefined> {
     const thread = await this.findMostRecentThread();
     if (!thread) return undefined;
@@ -165,13 +221,7 @@ export class AutoResumeController implements vscode.Disposable {
     const recentMinutes = Math.max(5, vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 180));
     if (ageMinutes > recentMinutes) return undefined;
 
-    const turns = await this.client!.request<ThreadTurnsListResponse>("thread/turns/list", {
-      threadId: thread.id,
-      limit: 1,
-      sortDirection: "desc",
-      itemsView: "summary",
-    });
-    const latest = turns.data[0];
+    const latest = await this.latestTurn(thread.id);
     const reason = classifyLimitError(latest);
     return reason ? { thread, reason } : undefined;
   }
@@ -189,23 +239,6 @@ export class AutoResumeController implements vscode.Disposable {
       archived: false,
     });
     return response.data[0];
-  }
-
-  private async resumeThread(threadId: string): Promise<void> {
-    const prompt = vscode.workspace.getConfiguration("codexAutoResume").get<string>(
-      "resumePrompt",
-      "继续。从中断处恢复，先检查当前工作区已有修改和上一轮状态，不要重复已经完成的工作。",
-    );
-
-    await this.client!.request("thread/resume", { threadId, excludeTurns: true }, 30_000);
-    await this.client!.request("turn/start", {
-      threadId,
-      turnTrigger: "codex-auto-resume",
-      input: [{ type: "text", text: prompt, text_elements: [] }],
-    }, 30_000);
-
-    this.output.appendLine(`[auto-resume] resumed thread ${threadId}`);
-    void vscode.window.showInformationMessage(`Codex Auto Resume resumed thread ${threadId}.`);
   }
 
   private computeResetAt(limits: RateLimitSnapshot | null): number | undefined {
@@ -249,7 +282,7 @@ export class AutoResumeController implements vscode.Disposable {
     }
     const reset = new Date(armed.resetAtMs).toLocaleTimeString();
     this.statusBar.text = `$(clock) Codex Resume: ${reset}`;
-    this.statusBar.tooltip = `Thread ${armed.threadId} will resume after the reported quota reset`;
+    this.statusBar.tooltip = `Thread ${armed.threadId} is armed; automatic write is paused until the official submit bridge is validated`;
   }
 }
 
@@ -258,4 +291,8 @@ function classifyLimitError(turn: CodexTurn | undefined): ArmedResume["reason"] 
   if (info === "usageLimitExceeded") return "usageLimitExceeded";
   if (info === "rateLimitExceeded") return "rateLimitExceeded";
   return undefined;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
