@@ -121,10 +121,37 @@ export class AutoResumeController implements vscode.Disposable {
     this.output.appendLine(`[ui-ipc-test] target thread: ${thread.id}`);
     this.output.appendLine(`[ui-ipc-test] latest turn before test: ${before?.id ?? "<none>"}`);
 
+    // Owner discovery only succeeds for a conversation that the official UI has mounted/rendered.
+    // Opening the sidebar wakes the official extension and often remounts its most recent thread.
+    this.output.appendLine("[ui-ipc-test] opening official Codex sidebar before owner discovery");
+    await vscode.commands.executeCommand("chatgpt.openSidebar");
+    await delay(1500);
+
     const versions = readCodexUiIpcVersions(this.output);
     const ipc = new CodexUiIpcClient(this.output);
+    let ownerClientId: string | undefined;
     try {
-      await ipc.startTurn(thread.id, prompt, versions);
+      await ipc.connect();
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        ownerClientId = await ipc.discoverOwner(thread.id, versions.ownerDiscovery);
+        this.output.appendLine(
+          `[ui-ipc-test] owner discovery ${attempt}/5: ${ownerClientId ?? "<none>"}`,
+        );
+        if (ownerClientId) break;
+        await delay(1000);
+      }
+
+      if (!ownerClientId) {
+        this.output.appendLine(
+          "[ui-ipc-test] NO OWNER: the target thread is not currently claimable through Codex UI IPC. Open the exact interrupted conversation in the Codex sidebar, wait a few seconds, and run this test again.",
+        );
+        void vscode.window.showWarningMessage(
+          "No Codex UI IPC owner was found for the target thread. Open the exact interrupted conversation in the Codex sidebar, wait 2-3 seconds, then run the UI IPC bridge test again.",
+        );
+        return;
+      }
+
+      await ipc.startTurn(thread.id, prompt, versions, ownerClientId);
     } finally {
       ipc.dispose();
     }
