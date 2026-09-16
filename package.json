@@ -56,9 +56,9 @@
         },
         "codexAutoResume.recentThreadMinutes": {
           "type": "number",
-          "default": 180,
+          "default": 480,
           "minimum": 5,
-          "description": "Only arm auto-resume for VS Code Codex threads updated within this many minutes."
+          "description": "Only arm auto-resume for VS Code Codex threads updated within this many minutes. The default covers a full 5-hour quota window plus margin."
         },
         "codexAutoResume.codexCommand": {
           "type": "string",
