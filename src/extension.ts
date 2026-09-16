@@ -13,6 +13,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("codexAutoResume.disable", () => controller.disable()),
     vscode.commands.registerCommand("codexAutoResume.status", () => controller.showStatus()),
     vscode.commands.registerCommand("codexAutoResume.resumeNow", () => controller.resumeNow()),
+    vscode.commands.registerCommand("codexAutoResume.testOfficialSubmitBridge", () => controller.testOfficialSubmitBridge()),
     vscode.commands.registerCommand("codexAutoResume.diagnoseOfficialCodex", () => diagnoseOfficialCodex(output)),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("codexAutoResume")) {
