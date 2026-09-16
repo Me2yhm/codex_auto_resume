@@ -1,0 +1,75 @@
+{
+  "name": "codex-auto-resume",
+  "displayName": "Codex Auto Resume",
+  "description": "Resume VS Code Codex threads automatically after usage limits reset.",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:codexAutoResume.enable",
+    "onCommand:codexAutoResume.disable",
+    "onCommand:codexAutoResume.status",
+    "onCommand:codexAutoResume.resumeNow"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "codexAutoResume.enable", "title": "Codex Auto Resume: Enable" },
+      { "command": "codexAutoResume.disable", "title": "Codex Auto Resume: Disable" },
+      { "command": "codexAutoResume.status", "title": "Codex Auto Resume: Show Status" },
+      { "command": "codexAutoResume.resumeNow", "title": "Codex Auto Resume: Resume Now" }
+    ],
+    "configuration": {
+      "title": "Codex Auto Resume",
+      "properties": {
+        "codexAutoResume.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically resume a recently interrupted VS Code Codex thread after its usage limit resets."
+        },
+        "codexAutoResume.resumePrompt": {
+          "type": "string",
+          "default": "继续。从中断处恢复，先检查当前工作区已有修改和上一轮状态，不要重复已经完成的工作。",
+          "description": "Prompt sent when the extension resumes an interrupted Codex thread."
+        },
+        "codexAutoResume.pollIntervalSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 15,
+          "description": "How often to refresh Codex usage state while auto resume is enabled."
+        },
+        "codexAutoResume.resetGraceSeconds": {
+          "type": "number",
+          "default": 90,
+          "minimum": 0,
+          "description": "Extra delay after the reported reset time before resuming."
+        },
+        "codexAutoResume.recentThreadMinutes": {
+          "type": "number",
+          "default": 180,
+          "minimum": 5,
+          "description": "Only arm auto-resume for VS Code Codex threads updated within this many minutes."
+        },
+        "codexAutoResume.codexCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Codex executable override. When empty, the binary bundled with the official openai.chatgpt extension is preferred."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "check": "tsc -p . --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.100.0",
+    "typescript": "^5.9.2"
+  }
+}
