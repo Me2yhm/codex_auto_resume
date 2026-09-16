@@ -13,7 +13,8 @@
     "onCommand:codexAutoResume.enable",
     "onCommand:codexAutoResume.disable",
     "onCommand:codexAutoResume.status",
-    "onCommand:codexAutoResume.resumeNow"
+    "onCommand:codexAutoResume.resumeNow",
+    "onCommand:codexAutoResume.diagnoseOfficialCodex"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -21,7 +22,8 @@
       { "command": "codexAutoResume.enable", "title": "Codex Auto Resume: Enable" },
       { "command": "codexAutoResume.disable", "title": "Codex Auto Resume: Disable" },
       { "command": "codexAutoResume.status", "title": "Codex Auto Resume: Show Status" },
-      { "command": "codexAutoResume.resumeNow", "title": "Codex Auto Resume: Resume Now" }
+      { "command": "codexAutoResume.resumeNow", "title": "Codex Auto Resume: Resume Now" },
+      { "command": "codexAutoResume.diagnoseOfficialCodex", "title": "Codex Auto Resume: Diagnose Official Codex Integration" }
     ],
     "configuration": {
       "title": "Codex Auto Resume",
