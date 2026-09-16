@@ -26,6 +26,16 @@ export interface CodexUiIpcVersions {
   startTurn: number;
 }
 
+export class CodexUiIpcRequestError extends Error {
+  constructor(
+    readonly code: string,
+    readonly method: string,
+  ) {
+    super(`Codex UI IPC ${method} failed: ${code}`);
+    this.name = "CodexUiIpcRequestError";
+  }
+}
+
 const INITIALIZING_CLIENT_ID = "initializing-client";
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
@@ -123,23 +133,38 @@ export class CodexUiIpcClient implements vscode.Disposable {
     this.output.appendLine(`[ui-ipc] initialized as ${assigned}`);
   }
 
+  async discoverOwner(threadId: string, version: number): Promise<string | undefined> {
+    await this.connect();
+    try {
+      const response = await this.request(
+        "thread-owner-discovery",
+        version,
+        { hostId: "local", conversationId: threadId },
+      );
+      const owner = response.handledByClientId;
+      if (owner) this.output.appendLine(`[ui-ipc] owner for ${threadId}: ${owner}`);
+      return owner;
+    } catch (error) {
+      if (error instanceof CodexUiIpcRequestError && error.code === "no-client-found") {
+        this.output.appendLine(`[ui-ipc] no active IPC owner found for ${threadId}`);
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   async startTurn(
     threadId: string,
     prompt: string,
     versions: CodexUiIpcVersions,
+    knownOwnerClientId?: string,
   ): Promise<void> {
     await this.connect();
 
-    const ownerResponse = await this.request(
-      "thread-owner-discovery",
-      versions.ownerDiscovery,
-      { hostId: "local", conversationId: threadId },
-    );
-    const ownerClientId = ownerResponse.handledByClientId;
+    const ownerClientId = knownOwnerClientId ?? await this.discoverOwner(threadId, versions.ownerDiscovery);
     if (!ownerClientId) {
-      throw new Error("Codex UI IPC could not discover an active owner for the target thread.");
+      throw new CodexUiIpcRequestError("no-client-found", "thread-owner-discovery");
     }
-    this.output.appendLine(`[ui-ipc] owner for ${threadId}: ${ownerClientId}`);
 
     await this.request(
       "thread-follower-start-turn",
@@ -254,7 +279,7 @@ export class CodexUiIpcClient implements vscode.Disposable {
     this.pending.delete(record.requestId);
     const response = record as unknown as IpcResponse;
     if (response.resultType === "error") {
-      pending.reject(new Error(`Codex UI IPC ${response.method ?? "request"} failed: ${response.error ?? "unknown error"}`));
+      pending.reject(new CodexUiIpcRequestError(response.error ?? "unknown-error", response.method ?? "request"));
       return;
     }
     pending.resolve(response);
