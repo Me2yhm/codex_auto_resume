@@ -14,12 +14,14 @@ import {
 } from "./types";
 
 const STATE_KEY = "codexAutoResume.armed";
+const RESUME_OBSERVATION_POLL_MS = 1_000;
 
 export class AutoResumeController implements vscode.Disposable {
   private client?: CodexRpcClient;
   private timer?: NodeJS.Timeout;
   private running = false;
   private lastObservation?: string;
+  private lastResumeObservation?: string;
   private statusBar: vscode.StatusBarItem;
 
   constructor(
@@ -46,7 +48,11 @@ export class AutoResumeController implements vscode.Disposable {
     await vscode.workspace.getConfiguration("codexAutoResume").update("enabled", true, vscode.ConfigurationTarget.Global);
     await this.start();
     const armed = this.armed();
-    if (armed) {
+    if (armed?.resumeTurnId) {
+      void vscode.window.showInformationMessage(
+        `Codex Auto Resume enabled and verifying resume turn ${armed.resumeTurnId} for ${armed.threadId}.`,
+      );
+    } else if (armed) {
       const reset = new Date(armed.resetAtMs).toLocaleString();
       const eligible = new Date(this.resumeEligibleAtMs(armed)).toLocaleString();
       void vscode.window.showInformationMessage(
@@ -74,6 +80,12 @@ export class AutoResumeController implements vscode.Disposable {
     }
     if (!armed) {
       void vscode.window.showInformationMessage("Codex Auto Resume is enabled and monitoring; no interrupted thread is armed.");
+      return;
+    }
+    if (armed.resumeTurnId) {
+      void vscode.window.showInformationMessage(
+        `Codex Auto Resume is verifying resume turn ${armed.resumeTurnId} on thread ${armed.threadId}. It will not send another continuation until this attempt is classified.`,
+      );
       return;
     }
     const reset = new Date(armed.resetAtMs).toLocaleString();
@@ -202,7 +214,9 @@ export class AutoResumeController implements vscode.Disposable {
       const limits = await this.readRateLimits();
       const armed = this.armed();
 
-      if (armed) {
+      if (armed?.resumeTurnId) {
+        await this.checkTrackedResumeAttempt(armed, limits);
+      } else if (armed) {
         const eligibleAtMs = this.resumeEligibleAtMs(armed);
         if (Date.now() >= eligibleAtMs) {
           if (this.quotaLooksAvailable(limits)) {
@@ -267,16 +281,115 @@ export class AutoResumeController implements vscode.Disposable {
       return;
     }
 
-    const verified = await this.verifyNewTurn(armed.threadId, before?.id, "auto-resume");
-    if (!verified) {
+    const resumedTurn = await this.waitForNewTurn(armed.threadId, before?.id, "auto-resume");
+    if (!resumedTurn) {
       this.output.appendLine(
         `[auto-resume] start-turn was accepted but no new turn was observed for ${armed.threadId}; keeping thread armed`,
       );
       return;
     }
 
-    await this.context.workspaceState.update(STATE_KEY, undefined);
-    this.output.appendLine(`[auto-resume] resumed and disarmed thread ${armed.threadId}`);
+    const tracking: ArmedResume = {
+      ...armed,
+      resumeTurnId: resumedTurn.id,
+      resumeStartedAtMs: Date.now(),
+    };
+    await this.context.workspaceState.update(STATE_KEY, tracking);
+    this.lastResumeObservation = undefined;
+    this.output.appendLine(
+      `[auto-resume] resume turn ${resumedTurn.id} appeared; keeping the thread armed until the turn is confirmed stable`,
+    );
+
+    await this.observeTrackedResumeAttempt(tracking);
+  }
+
+  private async observeTrackedResumeAttempt(initial: ArmedResume): Promise<void> {
+    const deadline = Date.now() + Math.max(this.resumeStabilityMs() + 5_000, 20_000);
+    let tracked = initial;
+
+    while (Date.now() < deadline) {
+      await delay(RESUME_OBSERVATION_POLL_MS);
+      const current = this.armed();
+      if (!current?.resumeTurnId || current.resumeTurnId !== tracked.resumeTurnId) return;
+      tracked = current;
+
+      const outcome = await this.checkTrackedResumeAttempt(tracked, null);
+      if (outcome !== "pending") return;
+    }
+
+    this.output.appendLine(
+      `[auto-resume] resume turn ${tracked.resumeTurnId} is still not conclusively classified after the immediate verification window; keeping it tracked and rechecking on the next poll`,
+    );
+  }
+
+  private async checkTrackedResumeAttempt(
+    armed: ArmedResume,
+    limits: RateLimitSnapshot | null,
+  ): Promise<"pending" | "disarmed" | "rearmed"> {
+    const resumeTurnId = armed.resumeTurnId;
+    if (!resumeTurnId) return "pending";
+
+    const turn = await this.turnById(armed.threadId, resumeTurnId);
+    this.logResumeObservation(armed, turn, limits);
+    if (!turn) return "pending";
+
+    const explicitReason = classifyLimitError(turn);
+    const quotaBlockedWithoutStructuredError =
+      (turn.status === "interrupted" || turn.status === "failed") && this.quotaLooksBlocked(limits);
+
+    if (explicitReason || quotaBlockedWithoutStructuredError) {
+      const reason = explicitReason ?? "rateLimitReached";
+      const nextReset = this.computeResetAt(limits);
+      const rearmed: ArmedResume = {
+        ...armed,
+        reason,
+        resetAtMs: nextReset ?? armed.resetAtMs,
+        resumeTurnId: undefined,
+        resumeStartedAtMs: undefined,
+      };
+      await this.context.workspaceState.update(STATE_KEY, rearmed);
+      this.lastResumeObservation = undefined;
+      this.output.appendLine(
+        `[auto-resume] resume turn ${resumeTurnId} hit a quota limit (${reason}); keeping thread armed${nextReset ? ` until ${new Date(nextReset).toISOString()}` : " and waiting for rate-limit state to refresh"}`,
+      );
+      return "rearmed";
+    }
+
+    if (turn.status === "completed") {
+      await this.context.workspaceState.update(STATE_KEY, undefined);
+      this.lastResumeObservation = undefined;
+      this.output.appendLine(
+        `[auto-resume] resume turn ${resumeTurnId} completed; resumed and disarmed thread ${armed.threadId}`,
+      );
+      return "disarmed";
+    }
+
+    const startedAtMs = armed.resumeStartedAtMs ?? Date.now();
+    if (turn.status === "inProgress" && Date.now() - startedAtMs >= this.resumeStabilityMs()) {
+      await this.context.workspaceState.update(STATE_KEY, undefined);
+      this.lastResumeObservation = undefined;
+      this.output.appendLine(
+        `[auto-resume] resume turn ${resumeTurnId} has remained in progress without a quota error for ${Math.round((Date.now() - startedAtMs) / 1000)}s; resumed and disarmed thread ${armed.threadId}`,
+      );
+      return "disarmed";
+    }
+
+    if ((turn.status === "failed" || turn.status === "interrupted") && !turn.error) {
+      // The app-server can briefly persist a freshly-started turn as
+      // interrupted/error=null before the owner catches up. Do not interpret
+      // this transient state as either success or failure, and never resend
+      // while the attempt remains tracked.
+      return "pending";
+    }
+
+    if (turn.status === "failed" || turn.status === "interrupted") {
+      // A non-quota terminal failure is outside the scope of automatic quota
+      // recovery. Keep the tracked attempt instead of sending duplicate
+      // continuation prompts. The user can inspect it or use Resume Now.
+      return "pending";
+    }
+
+    return "pending";
   }
 
   private async sendThroughOfficialUi(threadId: string, prompt: string, logPrefix: string): Promise<boolean> {
@@ -304,8 +417,6 @@ export class AutoResumeController implements vscode.Disposable {
   private async surfaceOfficialThread(threadId: string, logPrefix: string): Promise<void> {
     this.output.appendLine(`[${logPrefix}] surfacing official Codex thread ${threadId}`);
 
-    // Recent official Codex builds accept a thread hint on openSidebar. Older
-    // builds simply ignore the argument, so this remains a safe first attempt.
     try {
       await vscode.commands.executeCommand("chatgpt.openSidebar", { threadId });
     } catch (error) {
@@ -315,9 +426,6 @@ export class AutoResumeController implements vscode.Disposable {
       await vscode.commands.executeCommand("chatgpt.openSidebar");
     }
 
-    // The official extension also exposes its conversation custom editor. It
-    // mounts the exact persisted thread in the current VS Code instance, which
-    // makes that thread eligible to answer UI-IPC owner discovery.
     try {
       const route = vscode.Uri.file(`/local/${threadId}`).with({
         scheme: "openai-codex",
@@ -356,20 +464,40 @@ export class AutoResumeController implements vscode.Disposable {
     return response.data[0];
   }
 
-  private async verifyNewTurn(threadId: string, beforeTurnId: string | undefined, logPrefix: string): Promise<boolean> {
+  private async turnById(threadId: string, turnId: string): Promise<CodexTurn | undefined> {
+    const response = await this.client!.request<ThreadTurnsListResponse>("thread/turns/list", {
+      threadId,
+      limit: 20,
+      sortDirection: "desc",
+      itemsView: "summary",
+    });
+    return response.data.find((turn) => turn.id === turnId);
+  }
+
+  private async waitForNewTurn(
+    threadId: string,
+    beforeTurnId: string | undefined,
+    logPrefix: string,
+  ): Promise<CodexTurn | undefined> {
     for (let attempt = 1; attempt <= 12; attempt += 1) {
       await delay(1000);
       const after = await this.latestTurn(threadId);
       this.output.appendLine(`[${logPrefix}] verification ${attempt}/12 latest turn: ${after?.id ?? "<none>"}`);
-      if (after?.id && after.id !== beforeTurnId) {
-        this.output.appendLine(
-          `[${logPrefix}] SUCCESS: a new turn appeared on the same thread (${after.id}); status=${after.status}; error=${formatTurnError(after)}.`,
-        );
-        return true;
-      }
+      if (after?.id && after.id !== beforeTurnId) return after;
     }
-    this.output.appendLine(`[${logPrefix}] FAILED: no new turn appeared on the target thread.`);
-    return false;
+    return undefined;
+  }
+
+  private async verifyNewTurn(threadId: string, beforeTurnId: string | undefined, logPrefix: string): Promise<boolean> {
+    const after = await this.waitForNewTurn(threadId, beforeTurnId, logPrefix);
+    if (!after) {
+      this.output.appendLine(`[${logPrefix}] FAILED: no new turn appeared on the target thread.`);
+      return false;
+    }
+    this.output.appendLine(
+      `[${logPrefix}] SUCCESS: a new turn appeared on the same thread (${after.id}); status=${after.status}; error=${formatTurnError(after)}.`,
+    );
+    return true;
   }
 
   private async findInterruptedThread(
@@ -396,9 +524,6 @@ export class AutoResumeController implements vscode.Disposable {
     const explicitReason = classifyLimitError(latest);
     if (explicitReason) return { thread, reason: explicitReason };
 
-    // A real quota stop can be persisted as an aborted/interrupted turn with
-    // error=null. Require independent account-level quota evidence so an
-    // ordinary user-initiated interrupt is never armed by status alone.
     const interruptedWithoutStructuredError = latest?.status === "interrupted" || latest?.status === "failed";
     if (interruptedWithoutStructuredError && this.quotaLooksBlocked(limits)) {
       this.output.appendLine(
@@ -415,17 +540,26 @@ export class AutoResumeController implements vscode.Disposable {
     turn: CodexTurn | undefined,
     limits: RateLimitSnapshot | null,
   ): void {
-    const observation = [
-      thread.id,
-      turn?.id ?? "none",
-      turn?.status ?? "none",
-      turn ? formatTurnError(turn) : "none",
-      formatRateLimits(limits),
-    ].join("|");
+    // Deliberately exclude resetsAt from the dedupe key. The backend often
+    // jitters those timestamps by +/-1s even when the actual state is unchanged.
+    const observation = stableObservationKey(thread.id, turn, limits);
     if (observation === this.lastObservation) return;
     this.lastObservation = observation;
     this.output.appendLine(
       `[auto-resume] observed thread=${thread.id}; latestTurn=${turn?.id ?? "<none>"}; status=${turn?.status ?? "<none>"}; error=${turn ? formatTurnError(turn) : "none"}; ${formatRateLimits(limits)}`,
+    );
+  }
+
+  private logResumeObservation(
+    armed: ArmedResume,
+    turn: CodexTurn | undefined,
+    limits: RateLimitSnapshot | null,
+  ): void {
+    const observation = stableObservationKey(armed.threadId, turn, limits);
+    if (observation === this.lastResumeObservation) return;
+    this.lastResumeObservation = observation;
+    this.output.appendLine(
+      `[auto-resume] verifying resume turn=${armed.resumeTurnId}; status=${turn?.status ?? "<not-found>"}; error=${turn ? formatTurnError(turn) : "none"}; ${formatRateLimits(limits)}`,
     );
   }
 
@@ -478,6 +612,14 @@ export class AutoResumeController implements vscode.Disposable {
     return seconds * 1000;
   }
 
+  private resumeStabilityMs(): number {
+    const seconds = Math.max(
+      5,
+      vscode.workspace.getConfiguration("codexAutoResume").get<number>("resumeStabilitySeconds", 15),
+    );
+    return seconds * 1000;
+  }
+
   private resumeEligibleAtMs(armed: ArmedResume): number {
     return armed.resetAtMs + this.resetGraceMs();
   }
@@ -494,6 +636,11 @@ export class AutoResumeController implements vscode.Disposable {
       this.statusBar.tooltip = "Watching for a Codex usage-limit interruption";
       return;
     }
+    if (armed.resumeTurnId) {
+      this.statusBar.text = "$(sync) Codex Resume: Verifying";
+      this.statusBar.tooltip = `Resume turn ${armed.resumeTurnId} is being verified; no duplicate continuation will be sent`;
+      return;
+    }
     const eligible = new Date(this.resumeEligibleAtMs(armed)).toLocaleTimeString();
     this.statusBar.text = `$(clock) Codex Resume: ${eligible}`;
     this.statusBar.tooltip = `Thread ${armed.threadId} is armed; earliest automatic resume attempt is ${eligible}`;
@@ -505,6 +652,22 @@ function classifyLimitError(turn: CodexTurn | undefined): ArmedResume["reason"] 
   if (info === "usageLimitExceeded") return "usageLimitExceeded";
   if (info === "rateLimitExceeded") return "rateLimitExceeded";
   return undefined;
+}
+
+function stableObservationKey(
+  threadId: string,
+  turn: CodexTurn | undefined,
+  limits: RateLimitSnapshot | null,
+): string {
+  return [
+    threadId,
+    turn?.id ?? "none",
+    turn?.status ?? "none",
+    turn ? formatTurnError(turn) : "none",
+    limits?.rateLimitReachedType ?? "none",
+    limits?.primary?.usedPercent ?? "none",
+    limits?.secondary?.usedPercent ?? "none",
+  ].join("|");
 }
 
 function formatTurnError(turn: CodexTurn): string {
