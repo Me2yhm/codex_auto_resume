@@ -77,4 +77,9 @@ export interface ArmedResume {
   armedAtMs: number;
   resetAtMs: number;
   reason: "usageLimitExceeded" | "rateLimitExceeded" | "rateLimitReached";
+  // Set only after a continuation has been accepted by the official Codex UI
+  // owner. Keeping this state persisted prevents duplicate continuation prompts
+  // if VS Code restarts while the resumed turn is still being classified.
+  resumeTurnId?: string;
+  resumeStartedAtMs?: number;
 }
