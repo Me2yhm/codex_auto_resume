@@ -54,6 +54,12 @@
           "minimum": 0,
           "description": "Extra delay after the reported reset time before resuming."
         },
+        "codexAutoResume.resumeStabilitySeconds": {
+          "type": "number",
+          "default": 15,
+          "minimum": 5,
+          "description": "How long a resumed turn must remain in progress without a quota error before auto-resume considers it stable and disarms. Completed turns disarm immediately."
+        },
         "codexAutoResume.recentThreadMinutes": {
           "type": "number",
           "default": 480,
