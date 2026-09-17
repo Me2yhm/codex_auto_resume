@@ -47,8 +47,10 @@ export class AutoResumeController implements vscode.Disposable {
     await this.start();
     const armed = this.armed();
     if (armed) {
+      const reset = new Date(armed.resetAtMs).toLocaleString();
+      const eligible = new Date(this.resumeEligibleAtMs(armed)).toLocaleString();
       void vscode.window.showInformationMessage(
-        `Codex Auto Resume enabled and armed for ${armed.threadId}. Resume after ${new Date(armed.resetAtMs).toLocaleString()}.`,
+        `Codex Auto Resume enabled and armed for ${armed.threadId}. Backend reset ${reset}; earliest resume attempt ${eligible}.`,
       );
     } else {
       void vscode.window.showInformationMessage("Codex Auto Resume enabled.");
@@ -75,7 +77,10 @@ export class AutoResumeController implements vscode.Disposable {
       return;
     }
     const reset = new Date(armed.resetAtMs).toLocaleString();
-    void vscode.window.showInformationMessage(`Codex Auto Resume is armed for thread ${armed.threadId}. Resume after ${reset}.`);
+    const eligible = new Date(this.resumeEligibleAtMs(armed)).toLocaleString();
+    void vscode.window.showInformationMessage(
+      `Codex Auto Resume is armed for thread ${armed.threadId}. Backend reset ${reset}; earliest resume attempt ${eligible}.`,
+    );
   }
 
   async resumeNow(): Promise<void> {
@@ -198,19 +203,20 @@ export class AutoResumeController implements vscode.Disposable {
       const armed = this.armed();
 
       if (armed) {
-        if (Date.now() >= armed.resetAtMs + this.resetGraceMs()) {
+        const eligibleAtMs = this.resumeEligibleAtMs(armed);
+        if (Date.now() >= eligibleAtMs) {
           if (this.quotaLooksAvailable(limits)) {
             await this.tryAutomaticResume(armed);
           } else {
             const nextReset = this.computeResetAt(limits);
-            if (nextReset) {
+            if (nextReset && nextReset !== armed.resetAtMs) {
               await this.context.workspaceState.update(STATE_KEY, { ...armed, resetAtMs: nextReset });
               this.output.appendLine(
-                `[auto-resume] quota still unavailable for ${armed.threadId}; next reset ${new Date(nextReset).toISOString()}`,
+                `[auto-resume] quota still unavailable for ${armed.threadId}; an exhausted window has a later reset ${new Date(nextReset).toISOString()}`,
               );
             } else {
               this.output.appendLine(
-                `[auto-resume] quota is not confirmed available for ${armed.threadId}, but no future reset timestamp is currently visible; keeping it armed`,
+                `[auto-resume] quota is not confirmed available for ${armed.threadId}; keeping it armed and polling again instead of advancing to an unrelated quota window`,
               );
             }
           }
@@ -229,7 +235,7 @@ export class AutoResumeController implements vscode.Disposable {
             };
             await this.context.workspaceState.update(STATE_KEY, record);
             this.output.appendLine(
-              `[auto-resume] armed thread ${record.threadId}; reason=${record.reason}; resume after ${new Date(resetAtMs).toISOString()}`,
+              `[auto-resume] armed thread ${record.threadId}; reason=${record.reason}; backend reset ${new Date(resetAtMs).toISOString()}; earliest attempt ${new Date(this.resumeEligibleAtMs(record)).toISOString()}`,
             );
           } else {
             this.output.appendLine(
@@ -446,11 +452,7 @@ export class AutoResumeController implements vscode.Disposable {
       .map((window) => window.resetsAt)
       .filter((value): value is number => typeof value === "number" && value * 1000 > Date.now());
 
-    if (exhausted.length > 0) return Math.max(...exhausted) * 1000;
-
-    const future = [limits.primary?.resetsAt, limits.secondary?.resetsAt]
-      .filter((value): value is number => typeof value === "number" && value * 1000 > Date.now());
-    return future.length > 0 ? Math.min(...future) * 1000 : undefined;
+    return exhausted.length > 0 ? Math.max(...exhausted) * 1000 : undefined;
   }
 
   private quotaLooksBlocked(limits: RateLimitSnapshot | null): boolean {
@@ -476,6 +478,10 @@ export class AutoResumeController implements vscode.Disposable {
     return seconds * 1000;
   }
 
+  private resumeEligibleAtMs(armed: ArmedResume): number {
+    return armed.resetAtMs + this.resetGraceMs();
+  }
+
   private renderStatus(): void {
     if (!this.enabled()) {
       this.statusBar.text = "$(circle-slash) Codex Resume: Off";
@@ -488,9 +494,9 @@ export class AutoResumeController implements vscode.Disposable {
       this.statusBar.tooltip = "Watching for a Codex usage-limit interruption";
       return;
     }
-    const reset = new Date(armed.resetAtMs).toLocaleTimeString();
-    this.statusBar.text = `$(clock) Codex Resume: ${reset}`;
-    this.statusBar.tooltip = `Thread ${armed.threadId} is armed for automatic UI IPC resume`;
+    const eligible = new Date(this.resumeEligibleAtMs(armed)).toLocaleTimeString();
+    this.statusBar.text = `$(clock) Codex Resume: ${eligible}`;
+    this.statusBar.tooltip = `Thread ${armed.threadId} is armed; earliest automatic resume attempt is ${eligible}`;
   }
 }
 
