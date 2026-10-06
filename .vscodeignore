@@ -6,6 +6,7 @@ src/**
 node_modules/**
 .vscode-test/**
 *.vsix
+README.md
 tsconfig.json
 package-lock.json
 .gitignore
