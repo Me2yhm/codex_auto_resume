@@ -1,22 +1,14 @@
-# Codex Auto Resume
+# codex_auto_resume
 
-A private VS Code companion extension that resumes OpenAI Codex work after a usage-limit interruption.
+Private development repository for the **Codex Auto Resume** VS Code companion extension.
 
-The extension reads Codex's reported reset timestamp, remembers the exact VS Code thread that was interrupted, waits for quota recovery, surfaces that same conversation, and asks the official Codex extension to continue it through Codex UI IPC.
+The user-facing extension documentation is kept separately in [README.extension.md](README.extension.md). That file is embedded into the VSIX and shown on the extension details page.
 
-## Current status
+## Goal
 
-Phase 2 has been validated end-to-end on Windows with the official `openai.chatgpt` extension:
+The project provides unattended recovery for VS Code Codex tasks interrupted by usage limits.
 
-- real 5-hour quota interruption detected;
-- exact Codex thread armed and persisted;
-- quota reset observed;
-- target conversation surfaced automatically;
-- Codex UI IPC owner discovered;
-- continuation turn started on the same thread;
-- resumed turn verified before disarming.
-
-The extension remains fail-closed: if it cannot identify the correct thread owner or verify the resumed turn, it keeps the thread armed instead of sending to another conversation.
+The implementation monitors Codex quota/thread state, persists the interrupted thread, waits for the reported reset, surfaces the exact conversation, resumes it through the official Codex UI IPC path, and verifies the resumed turn before disarming.
 
 ## Project layout
 
@@ -26,7 +18,7 @@ src/
   autoResumeController.ts   quota/thread state machine
   codexRpcClient.ts         read-only Codex app-server client
   codexUiIpcClient.ts       Codex UI IPC follower client
-  codexLocator.ts           finds Codex bundled with openai.chatgpt
+  codexLocator.ts           locates the Codex executable
   types.ts                  minimal protocol types
 
 scripts/windows/
@@ -34,7 +26,7 @@ scripts/windows/
 
 docs/
   architecture.md           architecture and safety model
-  phase1-windows.md         Task Scheduler + AutoHotkey setup
+  phase1-windows.md         Phase 1 fallback setup
 ```
 
 ## Development
@@ -45,10 +37,15 @@ Requirements:
 - VS Code
 - official OpenAI Codex extension (`openai.chatgpt`)
 
-Install dependencies and type-check:
+Install dependencies:
 
 ```bash
 npm ci
+```
+
+Type-check:
+
+```bash
 npm run check
 ```
 
@@ -58,51 +55,33 @@ Compile:
 npm run compile
 ```
 
-Press `F5` to launch an Extension Development Host.
+Press `F5` in VS Code to launch an Extension Development Host.
 
-## Build a VSIX
-
-Build a locally installable VSIX:
+## Build the VSIX
 
 ```bash
-npm ci
 npm run package:vsix
 ```
 
-The output is:
+This creates:
 
 ```text
 codex-auto-resume.vsix
 ```
 
-The GitHub Actions CI workflow also builds the same VSIX and uploads it as the `codex-auto-resume-vsix` artifact.
+The packaging command explicitly uses `README.extension.md` as the VSIX README, so the project README and the installed extension description remain independent.
 
-## Install the VSIX locally
+GitHub Actions also runs type-checking, compilation, VSIX packaging, and artifact upload on pushes to `main`.
 
-In a normal VS Code window:
+## Install for testing
 
-1. Open **Extensions**.
-2. Open the Extensions `...` menu.
-3. Choose **Install from VSIX...**.
-4. Select `codex-auto-resume.vsix`.
-5. Reload VS Code when prompted.
+### Local workspace
 
-Then run:
+Install `codex-auto-resume.vsix` from the normal VS Code Extensions view.
 
-```text
-Codex Auto Resume: Enable
-```
+### Remote SSH workspace
 
-Useful commands:
-
-- `Codex Auto Resume: Enable`
-- `Codex Auto Resume: Disable`
-- `Codex Auto Resume: Show Status`
-- `Codex Auto Resume: Resume Now`
-- `Codex Auto Resume: Test Official UI IPC Bridge`
-- `Codex Auto Resume: Diagnose Official Codex Integration`
-
-## Remote SSH installation
+Connect to the SSH host first, then install the same VSIX into the **remote extension host**.
 
 The extension declares:
 
@@ -110,40 +89,44 @@ The extension declares:
 "extensionKind": ["workspace"]
 ```
 
-Therefore, when working through VS Code Remote SSH, install the same VSIX into the **SSH remote extension host** alongside the remote instance of `openai.chatgpt`.
+so it is intended to execute beside the Codex instance associated with the current workspace.
 
-The same VSIX is intended for both local Windows workspaces and Remote SSH Linux workspaces. Remote SSH still requires its own validation because the Codex executable and IPC socket live on the remote host.
+## Current validated behavior
 
-## Important settings
+The Windows local flow has been validated end-to-end with a real usage-limit reset:
 
-```json
-{
-  "codexAutoResume.enabled": false,
-  "codexAutoResume.resumePrompt": "继续。从中断处恢复，先检查当前工作区已有修改和上一轮状态，不要重复已经完成的工作。",
-  "codexAutoResume.pollIntervalSeconds": 60,
-  "codexAutoResume.resetGraceSeconds": 90,
-  "codexAutoResume.resumeStabilitySeconds": 15,
-  "codexAutoResume.recentThreadMinutes": 480
-}
+```text
+quota interruption
+  -> arm exact thread
+  -> persist reset state
+  -> quota recovery
+  -> surface exact Codex conversation
+  -> discover official Codex UI owner
+  -> start continuation turn
+  -> verify resumed turn
+  -> disarm
 ```
 
-## Safety model
+Boundary testing also covers thread switching, Extension Host restart persistence, and two-stage resume verification.
 
-Auto Resume does not bypass Codex approval prompts.
+Remote SSH uses the same extension package but is validated separately because the Codex executable and IPC endpoint are provided by the remote environment.
 
-A quota interruption is armed only when the latest relevant thread state and account-level rate-limit state support that conclusion. After quota reset, the extension resumes only the persisted thread ID, verifies that a new turn appeared, and keeps verification state persisted until that turn is completed or stable.
+## Packaging files
 
-## Phase 1 fallback
-
-If a future Codex extension update breaks the UI IPC integration, `scripts/windows/resume-codex.ahk` remains available as the Phase 1 UI-automation fallback.
+- `README.md`: repository/developer documentation
+- `README.extension.md`: installed extension documentation
+- `.vscodeignore`: controls VSIX contents
+- `.github/workflows/ci.yml`: checks and packages the VSIX
 
 ## Python policy
 
-There are currently no Python helpers in this repository. If Python scripts are added later, use **uv** for dependency/project management and configure:
+There are currently no Python helpers in this repository.
+
+If Python is introduced later, use **uv** and configure:
 
 ```toml
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple"
 ```
 
-Do not introduce pip/requirements.txt-based project management alongside uv.
+Do not add pip/`requirements.txt` project management alongside uv.
