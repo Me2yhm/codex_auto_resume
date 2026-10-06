@@ -6,12 +6,20 @@ on:
   pull_request:
 
 jobs:
-  typecheck:
+  typecheck-and-package:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
+          cache: npm
+      - run: npm ci
       - run: npm run check
+      - run: npm run compile
+      - run: npx --yes @vscode/vsce@3.6.0 package --out codex-auto-resume.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-auto-resume-vsix
+          path: codex-auto-resume.vsix
+          if-no-files-found: error
