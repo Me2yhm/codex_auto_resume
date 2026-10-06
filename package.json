@@ -1,8 +1,8 @@
 {
   "name": "codex-auto-resume",
   "displayName": "Codex Auto Resume",
-  "description": "Resume VS Code Codex threads automatically after usage limits reset.",
-  "version": "0.2.0",
+  "description": "Automatically resume interrupted OpenAI Codex work after usage limits reset.",
+  "version": "0.2.1",
   "publisher": "me2yhm",
   "private": true,
   "license": "UNLICENSED",
@@ -116,7 +116,7 @@
     "watch": "tsc -w -p .",
     "check": "tsc -p . --noEmit",
     "vscode:prepublish": "npm run compile",
-    "package:vsix": "npm run check && npx --yes @vscode/vsce@3.6.0 package --out codex-auto-resume.vsix"
+    "package:vsix": "npm run check && npx --yes @vscode/vsce@3.6.0 package --readme-path README.extension.md --out codex-auto-resume.vsix"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
