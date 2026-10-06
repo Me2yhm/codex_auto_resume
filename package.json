@@ -116,12 +116,11 @@
     "watch": "tsc -w -p .",
     "check": "tsc -p . --noEmit",
     "vscode:prepublish": "npm run compile",
-    "package:vsix": "npm run check && vsce package --out codex-auto-resume.vsix"
+    "package:vsix": "npm run check && npx --yes @vscode/vsce@3.6.0 package --out codex-auto-resume.vsix"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/vscode": "^1.100.0",
-    "@vscode/vsce": "^3.6.0",
     "typescript": "^5.9.2"
   }
 }
