@@ -41,19 +41,28 @@ export async function trySendTurnThroughExistingOfficialOwner(
   logPrefix: string,
   overrides: CodexTurnStartOverrides = {},
 ): Promise<boolean> {
-  const versions = readCodexUiIpcVersions(output);
-  const ipc = new CodexUiIpcClient(output);
+  let ownerClientId: string | undefined;
+  let ipc: CodexUiIpcClient | undefined;
+
   try {
+    const versions = readCodexUiIpcVersions(output);
+    ipc = new CodexUiIpcClient(output);
     await ipc.connect();
-    const ownerClientId = await ipc.discoverOwner(threadId, versions.ownerDiscovery);
+    ownerClientId = await ipc.discoverOwner(threadId, versions.ownerDiscovery);
     output.appendLine(
       `[${logPrefix}] silent owner discovery: ${ownerClientId ?? "<none>"}`,
     );
     if (!ownerClientId) return false;
     await ipc.startTurn(threadId, prompt, versions, ownerClientId, overrides);
     return true;
+  } catch (error) {
+    if (ownerClientId) throw error;
+    output.appendLine(
+      `[${logPrefix}] silent owner discovery unavailable: ${(error as Error).message}; trying the direct writer path`,
+    );
+    return false;
   } finally {
-    ipc.dispose();
+    ipc?.dispose();
   }
 }
 
