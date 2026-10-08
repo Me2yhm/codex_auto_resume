@@ -612,15 +612,13 @@ export class QuotaPrimerController implements vscode.Disposable {
       secondaryMotion === "moving";
     if (
       stillMoving &&
-      Date.now() - pending.sentAtMs >= WINDOW_PROBE_RETRY_MS
+      Date.now() - pending.sentAtMs >= WINDOW_PROBE_RETRY_MS &&
+      !pending.stalledWarningLogged
     ) {
       this.output.appendLine(
-        `[quota-primer] resetAt is still moving more than ${WINDOW_PROBE_RETRY_MS / 1000}s after primer turn ${pending.turnId ?? "<unknown>"}; clearing confirmation so the dormant window can be retried`,
+        `[quota-primer] resetAt is still moving more than ${WINDOW_PROBE_RETRY_MS / 1000}s after primer turn ${pending.turnId ?? "<unknown>"}; keeping this turn pending and refusing to send duplicate automatic primers for the same boundary`,
       );
-      return {
-        ...tracked,
-        pendingConfirmation: undefined,
-      };
+      nextPending.stalledWarningLogged = true;
     }
 
     return {
