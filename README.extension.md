@@ -2,185 +2,162 @@
 
 Codex Auto Resume is a companion extension for the official OpenAI Codex VS Code extension.
 
-When a Codex task stops because the usage limit has been reached, this extension remembers the interrupted conversation and Codex's reported reset time. After quota becomes available again, it reopens the same Codex conversation and sends a continuation prompt automatically.
+It provides two independent automation features:
 
-## What it does
+1. **Auto Resume** — continues a real work conversation after a usage-limit interruption.
+2. **Quota Window Primer** — sends a tiny request after a rolling quota reset so the next quota window starts counting immediately instead of waiting for your next real work session.
 
-The extension is designed for long-running Codex work that may be interrupted by usage limits.
+The two features use separate state and separate conversations.
 
-It can:
+## Auto Resume
 
-- detect a Codex turn that stopped because of `usageLimitExceeded` or `rateLimitExceeded`;
-- remember the exact Codex thread that should be resumed;
-- persist the pending resume state across Extension Host restarts;
-- wait for the reported quota reset instead of using a fixed five-hour timer;
-- reopen the target conversation even if another conversation is currently visible;
-- ask the existing official Codex client to start a new turn on that same thread;
-- verify that the resumed turn actually started before clearing the pending state;
-- keep monitoring if Codex is still quota-blocked after the nominal reset time.
+When a Codex task stops because a usage limit has been reached, Auto Resume remembers the exact work conversation and Codex's reported reset time. After quota becomes available again, it reopens that same conversation and sends the configured continuation prompt.
 
-It does **not** bypass Codex approval prompts or automatically approve tool calls.
-
-## Requirements
-
-- VS Code
-- the official OpenAI Codex extension: `openai.chatgpt`
-- Codex Auto Resume installed in the same VS Code extension host as Codex
-
-For a normal local workspace, install both extensions locally.
-
-For a Remote SSH workspace, install both the Codex extension and Codex Auto Resume on the **SSH remote** side.
-
-## Quick start
-
-After installing the extension, open the Command Palette and run:
+Enable it from the Command Palette:
 
 ```text
 Codex Auto Resume: Enable
 ```
 
-The extension will begin monitoring the current workspace.
-
-When Codex later stops because of a usage limit, Auto Resume records the interrupted thread and waits for quota recovery. No further action is required.
-
-To inspect the current state, run:
+Inspect its state with:
 
 ```text
 Codex Auto Resume: Show Status
 ```
 
-To disable monitoring:
+Auto Resume never uses the Quota Primer conversation as a work thread.
+
+## Quota Window Primer
+
+Codex rolling quota windows can begin when the first request is made after a reset. If you do not use Codex immediately after a reset, the next reset can therefore move later.
+
+Quota Window Primer watches the primary and secondary Codex quota reset times. After a tracked reset:
+
+- it waits for a configurable grace period;
+- checks whether another real Codex request has already started the new window;
+- checks whether another Codex thread is currently active;
+- checks for remaining account-level quota blockers;
+- performs a final randomized preflight check;
+- only then sends one tiny primer request.
+
+If both the primary and secondary windows reset together, only **one** primer request is sent.
+
+If you already used Codex and the account reports a new future reset time, Primer does nothing.
+
+### Dedicated conversation
+
+The first time a primer is actually needed, the extension creates a dedicated persistent conversation named:
 
 ```text
-Codex Auto Resume: Disable
+Codex Auto Resume - Quota Primer
 ```
+
+Future primer requests reuse that conversation instead of creating a new one.
+
+The Primer conversation is isolated from Auto Resume work-thread discovery.
+
+### Low-cost model policy
+
+Before each primer request, the extension calls Codex `model/list` and dynamically selects a low-cost model.
+
+The default preference is:
+
+```text
+luna
+```
+
+If multiple matching models are available, lightweight variants are preferred. Primer also selects the lowest supported reasoning effort by default.
+
+If Luna is unavailable, the extension falls back to another low-cost-looking model when possible, then to the current catalog default as a last resort, and logs the fallback.
+
+The model override applies only to the dedicated Primer conversation. Auto Resume never changes the model of your real work conversation.
+
+### Enable Primer
+
+Run:
+
+```text
+Codex Auto Resume: Enable Quota Primer
+```
+
+Primer is intentionally disabled by default.
+
+**Important:** Primer is account-wide in purpose but the extension state is local to one extension host. If you have both local VS Code and Remote SSH installed for the same Codex account, enable Quota Primer on only one of them.
+
+The setting is machine-scoped so local and Remote SSH instances can be configured independently.
+
+### Test Primer immediately
+
+Run:
+
+```text
+Codex Auto Resume: Prime Quota Now
+```
+
+This sends one manual primer immediately and is the recommended smoke test for:
+
+- first-time dedicated thread creation;
+- low-cost model selection;
+- thread naming;
+- later thread reuse;
+- local or Remote SSH transport compatibility.
+
+### Primer status
+
+Run:
+
+```text
+Codex Auto Resume: Show Quota Primer Status
+```
+
+To forget the dedicated primer conversation and force a new one on the next primer:
+
+```text
+Codex Auto Resume: Reset Quota Primer Thread
+```
+
+## Requirements
+
+- VS Code
+- official OpenAI Codex extension: `openai.chatgpt`
+- Codex Auto Resume installed in the same VS Code extension host as Codex
+
+For local workspaces, install both extensions locally.
+
+For Remote SSH workspaces, install both extensions on the **SSH remote** side.
 
 ## Commands
 
-### Codex Auto Resume: Enable
+### Auto Resume
 
-Enables automatic monitoring for the current workspace.
+- `Codex Auto Resume: Enable`
+- `Codex Auto Resume: Disable`
+- `Codex Auto Resume: Show Status`
+- `Codex Auto Resume: Resume Now`
 
-If a recent Codex thread in the workspace is already quota-blocked, the extension can arm that thread immediately.
+### Quota Primer
 
-### Codex Auto Resume: Disable
+- `Codex Auto Resume: Enable Quota Primer`
+- `Codex Auto Resume: Disable Quota Primer`
+- `Codex Auto Resume: Show Quota Primer Status`
+- `Codex Auto Resume: Prime Quota Now`
+- `Codex Auto Resume: Reset Quota Primer Thread`
 
-Disables monitoring and stops automatic resume attempts.
-
-### Codex Auto Resume: Show Status
-
-Shows whether the extension is:
-
-- disabled;
-- monitoring;
-- armed and waiting for a quota reset;
-- verifying a newly resumed turn.
-
-### Codex Auto Resume: Resume Now
-
-Manually sends the configured continuation prompt to the selected target Codex thread through the official Codex client.
-
-This is mainly useful for testing the integration.
-
-### Diagnostic commands
-
-The extension also includes diagnostic commands used to validate compatibility with the installed Codex extension:
+### Diagnostics
 
 - `Codex Auto Resume: Test Official UI IPC Bridge`
 - `Codex Auto Resume: Diagnose Official Codex Integration`
 - `Codex Auto Resume: Test Official Submit Bridge (Legacy)`
 
-Normal use does not require these commands.
-
 ## Configuration
 
-Open VS Code Settings and search for **Codex Auto Resume**, or configure the settings directly in JSON.
+Open VS Code Settings and search for **Codex Auto Resume**, or edit Settings JSON.
 
-### `codexAutoResume.enabled`
-
-Default:
-
-```json
-false
-```
-
-Controls whether automatic monitoring is enabled.
-
-You can also change this through the Enable and Disable commands.
-
-### `codexAutoResume.resumePrompt`
-
-Default:
-
-```text
-继续。从中断处恢复，先检查当前工作区已有修改和上一轮状态，不要重复已经完成的工作。
-```
-
-This is the prompt sent to Codex when a quota-interrupted thread is resumed.
-
-You can replace it with any continuation instruction you prefer.
-
-### `codexAutoResume.pollIntervalSeconds`
-
-Default:
-
-```text
-60
-```
-
-How often the extension refreshes Codex usage and thread state while monitoring.
-
-Minimum: 15 seconds.
-
-### `codexAutoResume.resetGraceSeconds`
-
-Default:
-
-```text
-90
-```
-
-Additional delay after Codex's reported reset time before Auto Resume attempts to continue the task.
-
-The grace period helps avoid resuming during the short interval where the backend reset time has passed but quota state has not yet propagated.
-
-### `codexAutoResume.resumeStabilitySeconds`
-
-Default:
-
-```text
-15
-```
-
-How long a newly resumed turn should remain active without another quota error before Auto Resume considers the resume successful.
-
-If the turn completes sooner, it is accepted immediately.
-
-### `codexAutoResume.recentThreadMinutes`
-
-Default:
-
-```text
-480
-```
-
-Only recent Codex threads are considered when looking for a quota-interrupted task to arm.
-
-The default eight-hour window comfortably covers a five-hour quota cycle.
-
-### `codexAutoResume.codexCommand`
-
-Default: empty.
-
-Normally the extension automatically finds the Codex executable bundled with the official `openai.chatgpt` extension.
-
-Use this setting only when you intentionally need to override that executable path.
-
-## Example settings
+### Auto Resume settings
 
 ```json
 {
-  "codexAutoResume.enabled": true,
+  "codexAutoResume.enabled": false,
   "codexAutoResume.resumePrompt": "继续。从中断处恢复，先检查当前工作区已有修改和上一轮状态，不要重复已经完成的工作。",
   "codexAutoResume.pollIntervalSeconds": 60,
   "codexAutoResume.resetGraceSeconds": 90,
@@ -189,9 +166,47 @@ Use this setting only when you intentionally need to override that executable pa
 }
 ```
 
-## Status and logs
+### Quota Primer settings
 
-Auto Resume exposes its current state in the VS Code status bar.
+```json
+{
+  "codexAutoResume.quotaPrimer.enabled": false,
+  "codexAutoResume.quotaPrimer.primaryEnabled": true,
+  "codexAutoResume.quotaPrimer.secondaryEnabled": true,
+  "codexAutoResume.quotaPrimer.pollIntervalSeconds": 60,
+  "codexAutoResume.quotaPrimer.graceSeconds": 90,
+  "codexAutoResume.quotaPrimer.jitterSeconds": 15,
+  "codexAutoResume.quotaPrimer.modelPreference": "luna",
+  "codexAutoResume.quotaPrimer.reasoningEffort": "lowest",
+  "codexAutoResume.quotaPrimer.prompt": "Quota window primer. Reply exactly OK. Do not inspect files, run tools, or modify anything."
+}
+```
+
+#### `quotaPrimer.primaryEnabled`
+
+Controls priming of the primary rolling quota window, normally the shorter 5-hour window.
+
+#### `quotaPrimer.secondaryEnabled`
+
+Controls priming of the secondary rolling quota window, normally the weekly window.
+
+#### `quotaPrimer.graceSeconds`
+
+Delay after the tracked reset time before Primer decides the window is still dormant.
+
+#### `quotaPrimer.jitterSeconds`
+
+Adds a small randomized preflight delay. The extension rereads rate limits after this delay, which helps suppress duplicate primers when multiple VS Code windows are running.
+
+#### `quotaPrimer.modelPreference`
+
+Model name or substring to prefer. Default: `luna`.
+
+#### `quotaPrimer.reasoningEffort`
+
+Default: `lowest`. The extension selects the lowest effort advertised by the chosen model. You may also provide an explicit supported effort.
+
+## Status and logs
 
 Detailed logs are available from:
 
@@ -199,30 +214,38 @@ Detailed logs are available from:
 View -> Output -> Codex Auto Resume
 ```
 
-Useful log events include:
+Auto Resume log lines use the `[auto-resume]` prefix.
 
-- a thread being armed;
-- the expected quota reset time;
-- quota becoming available;
-- the target Codex conversation being surfaced;
-- UI IPC owner discovery;
-- a continuation turn being started;
-- resume verification succeeding or remaining armed after another quota error.
+Quota Primer log lines use the `[quota-primer]` prefix.
+
+This separation makes it easy to distinguish work recovery from quota-window priming.
 
 ## Local and Remote SSH behavior
 
 The extension is a workspace extension.
 
-For local projects, it runs locally beside the local Codex extension.
+For Remote SSH projects, install the same VSIX on the remote host beside the remote Codex extension.
 
-For Remote SSH projects, install the same VSIX on the remote host beside the remote Codex extension. Auto Resume then uses the Codex executable, thread state, and IPC endpoint from that remote environment.
+Auto Resume is workspace-oriented and can be enabled independently in local and remote workspaces.
+
+Quota Primer should have a **single owner** for a Codex account. If the same account is used in both local and Remote SSH environments, enable Primer on only one extension host.
 
 ## Safety behavior
 
-Auto Resume is intentionally conservative:
+Auto Resume:
 
-- it resumes only the persisted target thread;
-- it does not send to an arbitrary currently visible conversation;
-- if the correct Codex thread owner cannot be found, the extension keeps the task armed instead of sending elsewhere;
-- if the resumed turn is immediately quota-blocked again, the task remains armed;
-- approval-required Codex actions remain subject to the normal Codex approval flow.
+- resumes only the persisted target work thread;
+- does not send to an arbitrary visible conversation;
+- keeps a task armed if the correct Codex UI owner cannot be found;
+- verifies the resumed turn before disarming.
+
+Quota Primer:
+
+- uses a dedicated conversation;
+- never intentionally primes a real work conversation;
+- skips priming when a new window has already started naturally;
+- skips while another Codex thread is active;
+- does not repeatedly create new conversations;
+- uses a low-cost model preference and lowest supported reasoning effort;
+- does not bypass approval prompts;
+- uses a prompt that explicitly forbids file inspection, tools, and modifications.
