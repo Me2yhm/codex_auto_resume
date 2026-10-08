@@ -1,6 +1,6 @@
 import * as fs from "fs/promises";
 import * as path from "path";
-import * as vscode from "vscode";
+import type * as vscode from "vscode";
 
 const LOCK_DIR_NAME = "quota-primer-send.lock";
 const LOCK_STALE_MS = 5 * 60_000;
