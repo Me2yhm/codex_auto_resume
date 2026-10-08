@@ -15,6 +15,7 @@ export interface QuotaPrimerPendingConfirmation {
 
 export interface QuotaPrimerState {
   threadId?: string;
+  threadCwd?: string;
   model?: string;
   effort?: string;
   primary?: QuotaPrimerWindowState;
