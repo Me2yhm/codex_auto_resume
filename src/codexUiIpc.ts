@@ -26,6 +26,11 @@ export interface CodexUiIpcVersions {
   startTurn: number;
 }
 
+export interface CodexTurnStartOverrides {
+  model?: string;
+  effort?: string;
+}
+
 export class CodexUiIpcRequestError extends Error {
   constructor(
     readonly code: string,
@@ -158,6 +163,7 @@ export class CodexUiIpcClient implements vscode.Disposable {
     prompt: string,
     versions: CodexUiIpcVersions,
     knownOwnerClientId?: string,
+    overrides: CodexTurnStartOverrides = {},
   ): Promise<void> {
     await this.connect();
 
@@ -176,6 +182,8 @@ export class CodexUiIpcClient implements vscode.Disposable {
             threadId,
             clientUserMessageId: crypto.randomUUID(),
             input: [{ type: "text", text: prompt, text_elements: [] }],
+            ...(overrides.model ? { model: overrides.model } : {}),
+            ...(overrides.effort ? { effort: overrides.effort } : {}),
           },
           context: { inheritThreadSettings: true },
         },
