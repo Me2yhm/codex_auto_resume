@@ -4,11 +4,17 @@ export interface QuotaPrimerWindowState {
   trackedResetAtMs?: number;
   windowDurationMins?: number | null;
   lastHandledResetAtMs?: number;
+  probeObservedAtMs?: number;
+  probeResetAtMs?: number;
 }
 
 export interface QuotaPrimerPendingConfirmation {
   primaryResetAtMs?: number;
   secondaryResetAtMs?: number;
+  primaryProbeObservedAtMs?: number;
+  primaryProbeResetAtMs?: number;
+  secondaryProbeObservedAtMs?: number;
+  secondaryProbeResetAtMs?: number;
   turnId?: string;
   sentAtMs: number;
 }
