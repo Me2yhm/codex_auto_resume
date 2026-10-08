@@ -8,6 +8,18 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+export interface CodexRpcClientInfo {
+  name: string;
+  title: string;
+  version: string;
+}
+
+const DEFAULT_CLIENT_INFO: CodexRpcClientInfo = {
+  name: "codex-auto-resume",
+  title: "Codex Auto Resume",
+  version: "0.3.0",
+};
+
 export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
   private child?: ChildProcessWithoutNullStreams;
   private buffer = "";
@@ -17,6 +29,7 @@ export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
   constructor(
     private readonly codexCommand: string,
     private readonly output: vscode.OutputChannel,
+    private readonly clientInfo: CodexRpcClientInfo = DEFAULT_CLIENT_INFO,
   ) {
     super();
   }
@@ -49,11 +62,7 @@ export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
     });
 
     await this.request("initialize", {
-      clientInfo: {
-        name: "codex-auto-resume",
-        title: "Codex Auto Resume",
-        version: "0.1.0",
-      },
+      clientInfo: this.clientInfo,
       capabilities: {
         experimentalApi: true,
       },
