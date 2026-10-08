@@ -549,7 +549,7 @@ export class QuotaPrimerController implements vscode.Disposable {
     const models: CodexModel[] = [];
     let cursor: string | null = null;
     do {
-      const response = await this.client!.request<ModelListResponse>("model/list", {
+      const response: ModelListResponse = await this.client!.request<ModelListResponse>("model/list", {
         limit: 100,
         includeHidden: true,
         cursor,
