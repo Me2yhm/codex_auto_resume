@@ -416,8 +416,7 @@ export class AutoResumeController implements vscode.Disposable {
       sortDirection: "desc",
       itemsView: "summary",
     });
-    const primerThreadId = this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY)?.threadId;
-    return response.data.find((thread) => thread.id !== primerThreadId);
+    return response.data[0];
   }
 
   private async turnById(threadId: string, turnId: string): Promise<CodexTurn | undefined> {
@@ -531,7 +530,14 @@ export class AutoResumeController implements vscode.Disposable {
       cwd: folders,
       archived: false,
     });
-    return response.data[0];
+    const primerThreadId = this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY)?.threadId;
+    const selected = response.data.find((thread) => thread.id !== primerThreadId);
+    if (!selected && response.data.length > 0 && primerThreadId) {
+      this.output.appendLine(
+        `[auto-resume] ignored dedicated quota-primer thread ${primerThreadId}; no other workspace Codex thread is available`,
+      );
+    }
+    return selected;
   }
 
   private computeResetAt(limits: RateLimitSnapshot | null): number | undefined {
