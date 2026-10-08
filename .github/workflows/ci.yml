@@ -16,7 +16,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - run: npm run compile
+      - run: npm test
       - run: npx --yes @vscode/vsce@3.6.0 package --readme-path README.extension.md --out codex-auto-resume.vsix
       - uses: actions/upload-artifact@v4
         with:
