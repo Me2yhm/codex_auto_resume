@@ -24,7 +24,6 @@ import {
 
 const PRIMER_THREAD_NAME = "Codex Auto Resume - Quota Primer";
 const PRIMER_THREAD_SOURCE = "codex-auto-resume-primer";
-const RESET_ADVANCE_TOLERANCE_MS = 60_000;
 const RESET_JITTER_TOLERANCE_MS = 5_000;
 const WINDOW_PROBE_MIN_ELAPSED_MS = 15_000;
 const WINDOW_PROBE_RETRY_MS = 120_000;
@@ -509,6 +508,8 @@ export class QuotaPrimerController implements vscode.Disposable {
 
     const observedAtMs = Date.now();
     let nextPending: QuotaPrimerPendingConfirmation = { ...pending };
+    let primaryMotion: WindowMotion | undefined;
+    let secondaryMotion: WindowMotion | undefined;
 
     if (pending.primaryResetAtMs) {
       const classification = classifyWindowMotion(
@@ -517,6 +518,7 @@ export class QuotaPrimerController implements vscode.Disposable {
         observedAtMs,
         resetAtMs(limits?.primary ?? null),
       );
+      primaryMotion = classification.motion;
       this.logWindowProbe("primary", classification, limits?.primary ?? null);
 
       if (classification.motion === "fixed") {
@@ -548,6 +550,7 @@ export class QuotaPrimerController implements vscode.Disposable {
         observedAtMs,
         resetAtMs(limits?.secondary ?? null),
       );
+      secondaryMotion = classification.motion;
       this.logWindowProbe("secondary", classification, limits?.secondary ?? null);
 
       if (classification.motion === "fixed") {
@@ -582,24 +585,12 @@ export class QuotaPrimerController implements vscode.Disposable {
       };
     }
 
+    const stillMoving =
+      primaryMotion === "moving" ||
+      secondaryMotion === "moving";
     if (
-      Date.now() - pending.sentAtMs >= WINDOW_PROBE_RETRY_MS &&
-      (
-        (nextPending.primaryResetAtMs &&
-          classifyWindowMotion(
-            nextPending.primaryProbeObservedAtMs,
-            nextPending.primaryProbeResetAtMs,
-            observedAtMs,
-            resetAtMs(limits?.primary ?? null),
-          ).motion === "moving") ||
-        (nextPending.secondaryResetAtMs &&
-          classifyWindowMotion(
-            nextPending.secondaryProbeObservedAtMs,
-            nextPending.secondaryProbeResetAtMs,
-            observedAtMs,
-            resetAtMs(limits?.secondary ?? null),
-          ).motion === "moving")
-      )
+      stillMoving &&
+      Date.now() - pending.sentAtMs >= WINDOW_PROBE_RETRY_MS
     ) {
       this.output.appendLine(
         `[quota-primer] resetAt is still moving more than ${WINDOW_PROBE_RETRY_MS / 1000}s after primer turn ${pending.turnId ?? "<unknown>"}; clearing confirmation so the dormant window can be retried`,
