@@ -151,9 +151,9 @@ export class QuotaPrimerController implements vscode.Disposable {
     const state = this.reconcileTracking(this.state(), limits);
     await this.saveState(state);
     const result = await this.sendPrimer(state, "quota-primer-manual");
-    if (!result.turn) {
+    if (!result.turn || !primerTurnAccepted(result.turn)) {
       void vscode.window.showWarningMessage(
-        "Codex Quota Primer could not create a confirmed primer turn. See the Codex Auto Resume output for details.",
+        `Codex Quota Primer did not get a confirmed successful primer turn${result.turn ? ` (status=${result.turn.status}, error=${formatPrimerTurnError(result.turn)})` : ""}. See the Codex Auto Resume output for details.`,
       );
       return;
     }
@@ -281,7 +281,12 @@ export class QuotaPrimerController implements vscode.Disposable {
       }
 
       const result = await this.sendPrimer(state, "quota-primer");
-      if (!result.turn) {
+      if (!result.turn || !primerTurnAccepted(result.turn)) {
+        if (result.turn) {
+          this.output.appendLine(
+            `[quota-primer] primer turn ${result.turn.id} was not accepted as successful; status=${result.turn.status}; error=${formatPrimerTurnError(result.turn)}; keeping the reset boundary pending`,
+          );
+        }
         await this.saveState(this.state());
         return;
       }
@@ -1055,6 +1060,10 @@ function formatThreadSource(source: unknown): string {
   } catch {
     return "<unknown>";
   }
+}
+
+function primerTurnAccepted(turn: CodexTurn): boolean {
+  return turn.status === "completed" || turn.status === "inProgress";
 }
 
 function classifyPrimerQuotaError(turn: CodexTurn | undefined): string | undefined {
