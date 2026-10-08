@@ -2,7 +2,7 @@
   "name": "codex-auto-resume",
   "displayName": "Codex Auto Resume",
   "description": "Automatically resume interrupted OpenAI Codex work and prime rolling quota windows after reset.",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "publisher": "me2yhm",
   "private": true,
   "license": "UNLICENSED",
@@ -191,6 +191,12 @@
           "default": "lowest",
           "scope": "machine",
           "description": "Reasoning effort for Primer turns. Use 'lowest' to select the cheapest supported effort automatically, or provide an explicit effort name."
+        },
+        "codexAutoResume.quotaPrimer.allowModelFallback": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Allow Quota Primer to use a different model if the preferred low-cost model is unavailable. Disabled by default to avoid unexpectedly expensive primer requests."
         }
       }
     }
@@ -200,7 +206,8 @@
     "watch": "tsc -w -p .",
     "check": "tsc -p . --noEmit",
     "vscode:prepublish": "npm run compile",
-    "package:vsix": "npm run check && npx --yes @vscode/vsce@3.6.0 package --readme-path README.extension.md --out codex-auto-resume.vsix"
+    "package:vsix": "npm run check && npx --yes @vscode/vsce@3.6.0 package --readme-path README.extension.md --out codex-auto-resume.vsix",
+    "test": "npm run compile && node --test tests/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
