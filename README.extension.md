@@ -102,6 +102,10 @@ This sends one manual primer immediately and is the recommended smoke test for:
 - later thread reuse;
 - local or Remote SSH transport compatibility.
 
+`Prime Quota Now` is a manual smoke test. It works even when automatic Primer is disabled, and it does **not** enable automatic priming. Run `Codex Auto Resume: Enable Quota Primer` separately when you are ready for reset-time automation.
+
+The dedicated Primer conversation is created in the workspace where the first primer is created so it can appear in that workspace's Codex conversation history. The stored thread is then reused globally by that extension host.
+
 ### Primer status
 
 Run:
