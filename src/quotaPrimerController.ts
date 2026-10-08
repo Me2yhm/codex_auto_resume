@@ -240,15 +240,15 @@ export class QuotaPrimerController implements vscode.Disposable {
         if (state.pendingConfirmation) return;
       }
 
-      let due = this.dueWindows(state, limits);
-      if (!due.primary && !due.secondary) {
+      const candidates = this.candidateWindows(state, limits);
+      if (!candidates.primary && !candidates.secondary) {
         await this.saveState(state);
         return;
       }
 
       if (this.quotaLooksBlocked(limits)) {
         this.output.appendLine(
-          `[quota-primer] reset boundary is due (${formatDueWindows(due)}), but another quota blocker is still active; waiting`,
+          `[quota-primer] quota-window candidate detected (${formatDueWindows(candidates)}), but another quota blocker is still active; waiting`,
         );
         await this.saveState(state);
         return;
@@ -256,33 +256,50 @@ export class QuotaPrimerController implements vscode.Disposable {
 
       if (await this.hasActiveCodexThread(state.threadId)) {
         this.output.appendLine(
-          `[quota-primer] reset boundary is due (${formatDueWindows(due)}), but Codex currently has an active thread; skipping this poll`,
+          `[quota-primer] quota-window candidate detected (${formatDueWindows(candidates)}), but Codex currently has an active work thread; waiting for natural usage to settle the window`,
         );
         await this.saveState(state);
         return;
       }
 
+      const observedAtMs = Date.now();
+      const probe = this.probeCandidateWindows(state, limits, candidates, observedAtMs);
+      state = probe.state;
+      await this.saveState(state);
+
+      if (probe.fixed.primary || probe.fixed.secondary) {
+        this.output.appendLine(
+          `[quota-primer] ${formatDueWindows(probe.fixed)} window(s) already have a fixed resetAt, so real Codex usage has already started them; no primer needed for those windows`,
+        );
+      }
+
+      const dormant = probe.moving;
+      if (!dormant.primary && !dormant.secondary) {
+        if (probe.unknown.primary || probe.unknown.secondary) {
+          this.output.appendLine(
+            `[quota-primer] need another rate-limit sample before classifying ${formatDueWindows(probe.unknown)} as dormant or active`,
+          );
+        }
+        return;
+      }
+
+      this.output.appendLine(
+        `[quota-primer] detected dormant ${formatDueWindows(dormant)} window(s): resetAt is moving with wall clock instead of staying fixed`,
+      );
+
       const jitterMs = this.jitterMs();
       if (jitterMs > 0) {
         this.output.appendLine(
-          `[quota-primer] reset boundary is due (${formatDueWindows(due)}); waiting ${Math.round(jitterMs / 1000)}s before the final preflight check`,
+          `[quota-primer] waiting ${Math.round(jitterMs / 1000)}s before the final primer preflight check`,
         );
         await delay(jitterMs);
       }
 
       limits = await this.readRateLimits();
       state = this.reconcileTracking(this.state(), limits);
-      due = this.dueWindows(state, limits);
-      if (!due.primary && !due.secondary) {
-        this.output.appendLine(
-          "[quota-primer] another Codex request already started the new quota window during preflight; no primer was sent",
-        );
-        await this.saveState(state);
-        return;
-      }
       if (this.quotaLooksBlocked(limits) || await this.hasActiveCodexThread(state.threadId)) {
         this.output.appendLine(
-          "[quota-primer] preflight no longer permits a primer; keeping the reset boundary pending",
+          "[quota-primer] final preflight no longer permits a primer; keeping the dormant boundary pending",
         );
         await this.saveState(state);
         return;
@@ -292,16 +309,26 @@ export class QuotaPrimerController implements vscode.Disposable {
       if (!result.turn || !primerTurnAccepted(result.turn)) {
         if (result.turn) {
           this.output.appendLine(
-            `[quota-primer] primer turn ${result.turn.id} was not accepted as successful; status=${result.turn.status}; error=${formatPrimerTurnError(result.turn)}; keeping the reset boundary pending`,
+            `[quota-primer] primer turn ${result.turn.id} was not accepted as successful; status=${result.turn.status}; error=${formatPrimerTurnError(result.turn)}; keeping the dormant boundary pending`,
           );
         }
         await this.saveState(this.state());
         return;
       }
 
+      const confirmationLimits = await this.readRateLimits();
+      const confirmationObservedAtMs = Date.now();
       const pending: QuotaPrimerPendingConfirmation = {
-        primaryResetAtMs: due.primary,
-        secondaryResetAtMs: due.secondary,
+        primaryResetAtMs: dormant.primary,
+        secondaryResetAtMs: dormant.secondary,
+        primaryProbeObservedAtMs: dormant.primary ? confirmationObservedAtMs : undefined,
+        primaryProbeResetAtMs: dormant.primary
+          ? resetAtMs(confirmationLimits?.primary ?? null)
+          : undefined,
+        secondaryProbeObservedAtMs: dormant.secondary ? confirmationObservedAtMs : undefined,
+        secondaryProbeResetAtMs: dormant.secondary
+          ? resetAtMs(confirmationLimits?.secondary ?? null)
+          : undefined,
         turnId: result.turn.id,
         sentAtMs: Date.now(),
       };
@@ -314,16 +341,8 @@ export class QuotaPrimerController implements vscode.Disposable {
       };
       await this.saveState(state);
       this.output.appendLine(
-        `[quota-primer] sent one primer turn ${result.turn.id} for ${formatDueWindows(due)}; waiting for account rate-limit windows to advance`,
+        `[quota-primer] sent one primer turn ${result.turn.id} for dormant ${formatDueWindows(dormant)} window(s); confirmation now requires resetAt to stop moving`,
       );
-
-      for (let attempt = 1; attempt <= PRIMER_CONFIRMATION_POLLS; attempt += 1) {
-        await delay(PRIMER_CONFIRMATION_POLL_MS);
-        limits = await this.readRateLimits();
-        state = await this.reconcilePendingConfirmation(this.state(), limits);
-        await this.saveState(state);
-        if (!state.pendingConfirmation) break;
-      }
     } catch (error) {
       this.output.appendLine(`[quota-primer] tick failed: ${(error as Error).message}`);
       this.client?.dispose();
@@ -336,25 +355,129 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   private reconcileTracking(state: QuotaPrimerState, limits: RateLimitSnapshot | null): QuotaPrimerState {
+    const now = Date.now();
     return {
       ...state,
-      primary: reconcileWindowState(state.primary, limits?.primary ?? null),
-      secondary: reconcileWindowState(state.secondary, limits?.secondary ?? null),
+      primary: reconcileWindowState(
+        state.primary,
+        limits?.primary ?? null,
+        now,
+        this.graceMs(),
+      ),
+      secondary: reconcileWindowState(
+        state.secondary,
+        limits?.secondary ?? null,
+        now,
+        this.graceMs(),
+      ),
     };
   }
 
-  private dueWindows(state: QuotaPrimerState, limits: RateLimitSnapshot | null): DueWindows {
+  private candidateWindows(state: QuotaPrimerState, limits: RateLimitSnapshot | null): DueWindows {
     const now = Date.now();
-    const due: DueWindows = {};
+    const candidates: DueWindows = {};
 
-    if (this.primaryEnabled() && windowIsDue(state.primary, limits?.primary ?? null, now, this.graceMs())) {
-      due.primary = state.primary?.trackedResetAtMs;
-    }
-    if (this.secondaryEnabled() && windowIsDue(state.secondary, limits?.secondary ?? null, now, this.graceMs())) {
-      due.secondary = state.secondary?.trackedResetAtMs;
+    if (
+      this.primaryEnabled() &&
+      (
+        windowIsDue(state.primary, now, this.graceMs()) ||
+        windowLooksLikeDormantCandidate(limits?.primary ?? null, now)
+      )
+    ) {
+      candidates.primary = state.primary?.trackedResetAtMs ?? resetAtMs(limits?.primary ?? null);
     }
 
-    return due;
+    if (
+      this.secondaryEnabled() &&
+      (
+        windowIsDue(state.secondary, now, this.graceMs()) ||
+        windowLooksLikeDormantCandidate(limits?.secondary ?? null, now)
+      )
+    ) {
+      candidates.secondary = state.secondary?.trackedResetAtMs ?? resetAtMs(limits?.secondary ?? null);
+    }
+
+    return candidates;
+  }
+
+  private probeCandidateWindows(
+    state: QuotaPrimerState,
+    limits: RateLimitSnapshot | null,
+    candidates: DueWindows,
+    observedAtMs: number,
+  ): {
+    state: QuotaPrimerState;
+    moving: DueWindows;
+    fixed: DueWindows;
+    unknown: DueWindows;
+  } {
+    let primary = state.primary;
+    let secondary = state.secondary;
+    const moving: DueWindows = {};
+    const fixed: DueWindows = {};
+    const unknown: DueWindows = {};
+
+    if (candidates.primary) {
+      const probe = observeWindowMotion(primary, limits?.primary ?? null, observedAtMs);
+      primary = probe.state;
+      this.logWindowProbe("primary", probe.classification, limits?.primary ?? null);
+      if (probe.classification.motion === "moving") {
+        moving.primary = candidates.primary;
+      } else if (probe.classification.motion === "fixed") {
+        fixed.primary = candidates.primary;
+        primary = advanceHandledWindow(
+          primary,
+          candidates.primary,
+          limits?.primary ?? null,
+          observedAtMs,
+        );
+      } else {
+        unknown.primary = candidates.primary;
+      }
+    }
+
+    if (candidates.secondary) {
+      const probe = observeWindowMotion(secondary, limits?.secondary ?? null, observedAtMs);
+      secondary = probe.state;
+      this.logWindowProbe("secondary", probe.classification, limits?.secondary ?? null);
+      if (probe.classification.motion === "moving") {
+        moving.secondary = candidates.secondary;
+      } else if (probe.classification.motion === "fixed") {
+        fixed.secondary = candidates.secondary;
+        secondary = advanceHandledWindow(
+          secondary,
+          candidates.secondary,
+          limits?.secondary ?? null,
+          observedAtMs,
+        );
+      } else {
+        unknown.secondary = candidates.secondary;
+      }
+    }
+
+    return {
+      state: { ...state, primary, secondary },
+      moving,
+      fixed,
+      unknown,
+    };
+  }
+
+  private logWindowProbe(
+    name: "primary" | "secondary",
+    classification: WindowProbeClassification,
+    window: RateLimitWindow | null,
+  ): void {
+    if (classification.motion === "unknown") {
+      this.output.appendLine(
+        `[quota-primer] ${name} motion probe captured reset=${formatWindowReset(window)}; waiting for a later sample`,
+      );
+      return;
+    }
+
+    this.output.appendLine(
+      `[quota-primer] ${name} motion probe=${classification.motion}; wallDelta=${formatDurationMs(classification.elapsedMs)}; resetDelta=${formatDurationMs(classification.resetDeltaMs)}; reset=${formatWindowReset(window)}`,
+    );
   }
 
   private async reconcilePendingConfirmation(
@@ -364,22 +487,7 @@ export class QuotaPrimerController implements vscode.Disposable {
     const pending = state.pendingConfirmation;
     if (!pending) return this.reconcileTracking(state, limits);
 
-    const tracked = this.reconcileTracking(state, limits);
-    const primaryConfirmed = boundaryConfirmed(pending.primaryResetAtMs, limits?.primary ?? null);
-    const secondaryConfirmed = boundaryConfirmed(pending.secondaryResetAtMs, limits?.secondary ?? null);
-
-    if (primaryConfirmed && secondaryConfirmed) {
-      const next = {
-        ...tracked,
-        primary: markBoundaryHandled(tracked.primary, pending.primaryResetAtMs),
-        secondary: markBoundaryHandled(tracked.secondary, pending.secondaryResetAtMs),
-        pendingConfirmation: undefined,
-      };
-      this.output.appendLine(
-        `[quota-primer] confirmed new quota window(s) after primer turn ${pending.turnId ?? "<unknown>"}; next resets: ${formatCurrentResets(limits)}`,
-      );
-      return next;
-    }
+    let tracked = this.reconcileTracking(state, limits);
 
     if (pending.turnId && state.threadId) {
       const turn = await this.turnById(state.threadId, pending.turnId);
@@ -390,7 +498,7 @@ export class QuotaPrimerController implements vscode.Disposable {
       const reason = explicitReason ?? (quotaBlockedWithoutStructuredError ? "rateLimitReached" : undefined);
       if (reason) {
         this.output.appendLine(
-          `[quota-primer] primer turn ${pending.turnId} was quota-blocked (${reason}); clearing the attempt and waiting for the blocker to clear`,
+          `[quota-primer] primer turn ${pending.turnId} was quota-blocked (${reason}); clearing confirmation and keeping the dormant reset boundary pending`,
         );
         return {
           ...tracked,
@@ -399,7 +507,113 @@ export class QuotaPrimerController implements vscode.Disposable {
       }
     }
 
-    return tracked;
+    const observedAtMs = Date.now();
+    let nextPending: QuotaPrimerPendingConfirmation = { ...pending };
+
+    if (pending.primaryResetAtMs) {
+      const classification = classifyWindowMotion(
+        pending.primaryProbeObservedAtMs,
+        pending.primaryProbeResetAtMs,
+        observedAtMs,
+        resetAtMs(limits?.primary ?? null),
+      );
+      this.logWindowProbe("primary", classification, limits?.primary ?? null);
+
+      if (classification.motion === "fixed") {
+        tracked = {
+          ...tracked,
+          primary: advanceHandledWindow(
+            tracked.primary,
+            pending.primaryResetAtMs,
+            limits?.primary ?? null,
+            observedAtMs,
+          ),
+        };
+        nextPending = {
+          ...nextPending,
+          primaryResetAtMs: undefined,
+          primaryProbeObservedAtMs: undefined,
+          primaryProbeResetAtMs: undefined,
+        };
+      } else {
+        nextPending.primaryProbeObservedAtMs = observedAtMs;
+        nextPending.primaryProbeResetAtMs = resetAtMs(limits?.primary ?? null);
+      }
+    }
+
+    if (pending.secondaryResetAtMs) {
+      const classification = classifyWindowMotion(
+        pending.secondaryProbeObservedAtMs,
+        pending.secondaryProbeResetAtMs,
+        observedAtMs,
+        resetAtMs(limits?.secondary ?? null),
+      );
+      this.logWindowProbe("secondary", classification, limits?.secondary ?? null);
+
+      if (classification.motion === "fixed") {
+        tracked = {
+          ...tracked,
+          secondary: advanceHandledWindow(
+            tracked.secondary,
+            pending.secondaryResetAtMs,
+            limits?.secondary ?? null,
+            observedAtMs,
+          ),
+        };
+        nextPending = {
+          ...nextPending,
+          secondaryResetAtMs: undefined,
+          secondaryProbeObservedAtMs: undefined,
+          secondaryProbeResetAtMs: undefined,
+        };
+      } else {
+        nextPending.secondaryProbeObservedAtMs = observedAtMs;
+        nextPending.secondaryProbeResetAtMs = resetAtMs(limits?.secondary ?? null);
+      }
+    }
+
+    if (!nextPending.primaryResetAtMs && !nextPending.secondaryResetAtMs) {
+      this.output.appendLine(
+        `[quota-primer] confirmed quota window activation after primer turn ${pending.turnId ?? "<unknown>"}: resetAt is now fixed; next resets: ${formatCurrentResets(limits)}`,
+      );
+      return {
+        ...tracked,
+        pendingConfirmation: undefined,
+      };
+    }
+
+    if (
+      Date.now() - pending.sentAtMs >= WINDOW_PROBE_RETRY_MS &&
+      (
+        (nextPending.primaryResetAtMs &&
+          classifyWindowMotion(
+            nextPending.primaryProbeObservedAtMs,
+            nextPending.primaryProbeResetAtMs,
+            observedAtMs,
+            resetAtMs(limits?.primary ?? null),
+          ).motion === "moving") ||
+        (nextPending.secondaryResetAtMs &&
+          classifyWindowMotion(
+            nextPending.secondaryProbeObservedAtMs,
+            nextPending.secondaryProbeResetAtMs,
+            observedAtMs,
+            resetAtMs(limits?.secondary ?? null),
+          ).motion === "moving")
+      )
+    ) {
+      this.output.appendLine(
+        `[quota-primer] resetAt is still moving more than ${WINDOW_PROBE_RETRY_MS / 1000}s after primer turn ${pending.turnId ?? "<unknown>"}; clearing confirmation so the dormant window can be retried`,
+      );
+      return {
+        ...tracked,
+        pendingConfirmation: undefined,
+      };
+    }
+
+    return {
+      ...tracked,
+      pendingConfirmation: nextPending,
+    };
   }
 
   private async sendPrimer(
