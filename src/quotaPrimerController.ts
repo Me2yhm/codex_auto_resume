@@ -26,8 +26,8 @@ const PRIMER_THREAD_NAME = "Codex Auto Resume - Quota Primer";
 const PRIMER_THREAD_SOURCE = "codex-auto-resume-primer";
 const RESET_ADVANCE_TOLERANCE_MS = 60_000;
 const RESET_JITTER_TOLERANCE_MS = 5_000;
-const PRIMER_CONFIRMATION_POLL_MS = 1_000;
-const PRIMER_CONFIRMATION_POLLS = 12;
+const WINDOW_PROBE_MIN_ELAPSED_MS = 15_000;
+const WINDOW_PROBE_RETRY_MS = 120_000;
 const UI_PRIMER_STABILITY_MS = 15_000;
 const UI_PRIMER_CONFIRMATION_POLLS = 120;
 
@@ -69,6 +69,14 @@ interface PrimerModelChoice {
 interface DueWindows {
   primary?: number;
   secondary?: number;
+}
+
+type WindowMotion = "moving" | "fixed" | "unknown";
+
+interface WindowProbeClassification {
+  motion: WindowMotion;
+  elapsedMs?: number;
+  resetDeltaMs?: number;
 }
 
 export class QuotaPrimerController implements vscode.Disposable {
