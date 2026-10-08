@@ -55,6 +55,11 @@ export interface CodexThread {
   id: string;
   preview: string;
   cwd: string;
+  name?: string | null;
+  originator?: string | null;
+  model?: string | null;
+  reasoningEffort?: string | null;
+  threadSource?: string | null;
   updatedAt: number;
   recencyAt: number | null;
   source: unknown;
