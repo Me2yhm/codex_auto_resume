@@ -74,7 +74,7 @@ luna
 
 If multiple matching models are available, lightweight variants are preferred. Primer also selects the lowest supported reasoning effort by default.
 
-If Luna is unavailable, the extension falls back to another low-cost-looking model when possible, then to the current catalog default as a last resort, and logs the fallback.
+If the preferred model is unavailable, Primer now **skips the automatic request by default** rather than silently falling back to a potentially more expensive model. You can opt into fallback behavior with `codexAutoResume.quotaPrimer.allowModelFallback`.
 
 The model override applies only to the dedicated Primer conversation. Auto Resume never changes the model of your real work conversation.
 
@@ -91,6 +91,8 @@ Primer is intentionally disabled by default.
 **Important:** Primer is account-wide in purpose but the extension state is local to one extension host. If you have both local VS Code and Remote SSH installed for the same Codex account, enable Quota Primer on only one of them.
 
 The setting is machine-scoped so local and Remote SSH instances can be configured independently.
+
+Multiple VS Code windows on the same machine can all observe this machine-scoped setting. Primer therefore uses an atomic same-host send lock in the extension's global storage so only one window can issue the automatic primer request for a boundary. This lock cannot coordinate different physical machines, so Local and Remote SSH should still have exactly one designated Primer owner.
 
 ### Test Primer immediately
 
@@ -188,6 +190,7 @@ Open VS Code Settings and search for **Codex Auto Resume**, or edit Settings JSO
   "codexAutoResume.quotaPrimer.jitterSeconds": 15,
   "codexAutoResume.quotaPrimer.modelPreference": "luna",
   "codexAutoResume.quotaPrimer.reasoningEffort": "lowest",
+  "codexAutoResume.quotaPrimer.allowModelFallback": false,
   "codexAutoResume.quotaPrimer.prompt": "Quota window primer. Reply exactly OK. Do not inspect files, run tools, or modify anything."
 }
 ```
@@ -215,6 +218,10 @@ Model name or substring to prefer. Default: `luna`.
 #### `quotaPrimer.reasoningEffort`
 
 Default: `lowest`. The extension selects the lowest effort advertised by the chosen model. You may also provide an explicit supported effort.
+
+#### `quotaPrimer.allowModelFallback`
+
+Default: `false`. When disabled, Primer skips the request if the preferred low-cost model is unavailable instead of silently choosing a potentially more expensive model. Enable this only if you explicitly accept fallback model usage.
 
 ## Status and logs
 
@@ -256,6 +263,9 @@ Quota Primer:
 - skips priming when a new window has already started naturally;
 - skips while another Codex thread is active;
 - does not repeatedly create new conversations;
+- serializes automatic sends across multiple VS Code windows on the same host;
+- keeps an unresolved successful primer pending instead of repeatedly sending duplicate automatic primers;
 - uses a low-cost model preference and lowest supported reasoning effort;
+- refuses expensive model fallback by default;
 - does not bypass approval prompts;
 - uses a prompt that explicitly forbids file inspection, tools, and modifications.
