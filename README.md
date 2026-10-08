@@ -20,10 +20,12 @@ src/
   extension.ts              VS Code activation and commands
   autoResumeController.ts   quota/thread state machine
   codexRpcClient.ts         read-only Codex app-server client
-  codexUiIpcClient.ts       Codex UI IPC follower client
+  codexUiIpc.ts             Codex UI IPC follower client
   codexLocator.ts           locates the Codex executable
   quotaPrimerController.ts  quota-window priming state machine
   quotaPrimerState.ts       persistent primer state
+  quotaPrimerWindowLogic.ts moving/fixed rolling-window classification
+  quotaPrimerLock.ts        same-host automatic-send serialization
   officialCodexUi.ts        shared UI IPC transport
   types.ts                  minimal protocol types
 
@@ -61,6 +63,12 @@ Compile:
 npm run compile
 ```
 
+Run tests:
+
+```bash
+npm test
+```
+
 Press `F5` in VS Code to launch an Extension Development Host.
 
 ## Build the VSIX
@@ -77,7 +85,7 @@ codex-auto-resume.vsix
 
 The packaging command explicitly uses `README.extension.md` as the VSIX README, so the project README and the installed extension description remain independent.
 
-GitHub Actions also runs type-checking, compilation, VSIX packaging, and artifact upload on pushes to `main`.
+GitHub Actions runs type-checking, quota-primer regression tests, VSIX packaging, and artifact upload on pushes to `main`.
 
 ## Install for testing
 
