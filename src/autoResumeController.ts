@@ -23,6 +23,7 @@ export class AutoResumeController implements vscode.Disposable {
   private running = false;
   private lastObservation?: string;
   private lastResumeObservation?: string;
+  private lastThreadSelectionDiagnostic?: string;
   private statusBar: vscode.StatusBarItem;
 
   constructor(
@@ -533,9 +534,15 @@ export class AutoResumeController implements vscode.Disposable {
     const primerThreadId = this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY)?.threadId;
     const selected = response.data.find((thread) => thread.id !== primerThreadId);
     if (!selected && response.data.length > 0 && primerThreadId) {
-      this.output.appendLine(
-        `[auto-resume] ignored dedicated quota-primer thread ${primerThreadId}; no other workspace Codex thread is available`,
-      );
+      const diagnosticKey = `primer-only:${primerThreadId}:${folders.join("|")}`;
+      if (this.lastThreadSelectionDiagnostic !== diagnosticKey) {
+        this.lastThreadSelectionDiagnostic = diagnosticKey;
+        this.output.appendLine(
+          `[auto-resume] ignored dedicated quota-primer thread ${primerThreadId}; no other workspace Codex thread is available`,
+        );
+      }
+    } else {
+      this.lastThreadSelectionDiagnostic = undefined;
     }
     return selected;
   }
