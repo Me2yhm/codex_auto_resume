@@ -1075,9 +1075,12 @@ export class QuotaPrimerController implements vscode.Disposable {
 function reconcileWindowState(
   state: QuotaPrimerWindowState | undefined,
   window: RateLimitWindow | null,
+  nowMs: number,
+  graceMs: number,
 ): QuotaPrimerWindowState | undefined {
   if (!window) return state;
-  const currentResetAtMs = typeof window.resetsAt === "number" ? window.resetsAt * 1_000 : undefined;
+
+  const currentResetAtMs = resetAtMs(window);
   if (!currentResetAtMs) {
     return {
       ...state,
@@ -1094,14 +1097,37 @@ function reconcileWindowState(
     };
   }
 
+  const boundaryStillPending =
+    state?.lastHandledResetAtMs !== trackedResetAtMs &&
+    nowMs >= trackedResetAtMs + graceMs;
+
+  // Once an old boundary has become due, never replace it merely because the
+  // backend starts returning a future resetAt. A dormant rolling window
+  // reports approximately "now + duration", so blindly adopting that value
+  // creates a moving target that can never become due.
+  //
+  // The same protection is used for a zero-usage full-duration window even
+  // when the extension starts after the original boundary was already missed.
   if (
-    currentResetAtMs > Date.now() &&
+    boundaryStillPending ||
+    windowLooksLikeDormantCandidate(window, nowMs)
+  ) {
+    return {
+      ...state,
+      windowDurationMins: window.windowDurationMins,
+    };
+  }
+
+  if (
+    currentResetAtMs > nowMs &&
     Math.abs(currentResetAtMs - trackedResetAtMs) > RESET_JITTER_TOLERANCE_MS
   ) {
     return {
       ...state,
       trackedResetAtMs: currentResetAtMs,
       windowDurationMins: window.windowDurationMins,
+      probeObservedAtMs: undefined,
+      probeResetAtMs: undefined,
     };
   }
 
@@ -1113,45 +1139,129 @@ function reconcileWindowState(
 
 function windowIsDue(
   state: QuotaPrimerWindowState | undefined,
-  current: RateLimitWindow | null,
   nowMs: number,
   graceMs: number,
 ): boolean {
   const boundary = state?.trackedResetAtMs;
   if (!boundary || state?.lastHandledResetAtMs === boundary) return false;
-  if (nowMs < boundary + graceMs) return false;
+  return nowMs >= boundary + graceMs;
+}
 
-  const currentResetAtMs = typeof current?.resetsAt === "number" ? current.resetsAt * 1_000 : undefined;
+function windowLooksLikeDormantCandidate(
+  window: RateLimitWindow | null,
+  nowMs: number,
+): boolean {
+  if (!window || typeof window.windowDurationMins !== "number") return false;
+  if (window.usedPercent > 0) return false;
+
+  const currentResetAtMs = resetAtMs(window);
+  if (!currentResetAtMs) return false;
+
+  const durationMs = window.windowDurationMins * 60_000;
+  if (durationMs <= 0) return false;
+
+  const remainingMs = currentResetAtMs - nowMs;
+  const toleranceMs = Math.max(
+    10_000,
+    Math.min(90_000, Math.round(durationMs * 0.001)),
+  );
+  return Math.abs(remainingMs - durationMs) <= toleranceMs;
+}
+
+function observeWindowMotion(
+  state: QuotaPrimerWindowState | undefined,
+  window: RateLimitWindow | null,
+  observedAtMs: number,
+): {
+  state: QuotaPrimerWindowState | undefined;
+  classification: WindowProbeClassification;
+} {
+  const currentResetAtMs = resetAtMs(window);
+  const classification = classifyWindowMotion(
+    state?.probeObservedAtMs,
+    state?.probeResetAtMs,
+    observedAtMs,
+    currentResetAtMs,
+  );
+
+  return {
+    state: {
+      ...state,
+      windowDurationMins: window?.windowDurationMins ?? state?.windowDurationMins,
+      probeObservedAtMs: observedAtMs,
+      probeResetAtMs: currentResetAtMs,
+    },
+    classification,
+  };
+}
+
+function classifyWindowMotion(
+  previousObservedAtMs: number | undefined,
+  previousResetAtMs: number | undefined,
+  currentObservedAtMs: number,
+  currentResetAtMs: number | undefined,
+): WindowProbeClassification {
   if (
-    currentResetAtMs &&
-    currentResetAtMs > nowMs &&
-    currentResetAtMs > boundary + RESET_ADVANCE_TOLERANCE_MS
+    previousObservedAtMs === undefined ||
+    previousResetAtMs === undefined ||
+    currentResetAtMs === undefined
   ) {
-    return false;
+    return { motion: "unknown" };
   }
 
-  return true;
-}
+  const elapsedMs = currentObservedAtMs - previousObservedAtMs;
+  if (elapsedMs < WINDOW_PROBE_MIN_ELAPSED_MS) {
+    return { motion: "unknown", elapsedMs };
+  }
 
-function boundaryConfirmed(boundary: number | undefined, current: RateLimitWindow | null): boolean {
-  if (!boundary) return true;
-  const currentResetAtMs = typeof current?.resetsAt === "number" ? current.resetsAt * 1_000 : undefined;
-  return Boolean(
-    currentResetAtMs &&
-      currentResetAtMs > Date.now() &&
-      currentResetAtMs > boundary + RESET_ADVANCE_TOLERANCE_MS,
+  const resetDeltaMs = currentResetAtMs - previousResetAtMs;
+  const toleranceMs = Math.max(
+    1_500,
+    Math.min(10_000, Math.round(elapsedMs * 0.25)),
   );
+
+  if (Math.abs(resetDeltaMs) <= toleranceMs) {
+    return { motion: "fixed", elapsedMs, resetDeltaMs };
+  }
+
+  if (Math.abs(resetDeltaMs - elapsedMs) <= toleranceMs) {
+    return { motion: "moving", elapsedMs, resetDeltaMs };
+  }
+
+  return { motion: "unknown", elapsedMs, resetDeltaMs };
 }
 
-function markBoundaryHandled(
+function advanceHandledWindow(
   state: QuotaPrimerWindowState | undefined,
   boundary: number | undefined,
+  current: RateLimitWindow | null,
+  observedAtMs: number,
 ): QuotaPrimerWindowState | undefined {
   if (!state || !boundary) return state;
+
+  const nextResetAtMs = resetAtMs(current);
   return {
     ...state,
     lastHandledResetAtMs: boundary,
+    trackedResetAtMs:
+      nextResetAtMs && nextResetAtMs > observedAtMs
+        ? nextResetAtMs
+        : state.trackedResetAtMs,
+    windowDurationMins: current?.windowDurationMins ?? state.windowDurationMins,
+    probeObservedAtMs: undefined,
+    probeResetAtMs: undefined,
   };
+}
+
+function resetAtMs(window: RateLimitWindow | null): number | undefined {
+  return typeof window?.resetsAt === "number"
+    ? window.resetsAt * 1_000
+    : undefined;
+}
+
+function formatDurationMs(value: number | undefined): string {
+  if (value === undefined) return "<none>";
+  return `${(value / 1000).toFixed(1)}s`;
 }
 
 function cheapModelScore(model: CodexModel): number {
