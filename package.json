@@ -1,8 +1,8 @@
 {
   "name": "codex-auto-resume",
   "displayName": "Codex Auto Resume",
-  "description": "Automatically resume interrupted OpenAI Codex work after usage limits reset.",
-  "version": "0.2.1",
+  "description": "Automatically resume interrupted OpenAI Codex work and prime rolling quota windows after reset.",
+  "version": "0.3.0",
   "publisher": "me2yhm",
   "private": true,
   "license": "UNLICENSED",
@@ -22,7 +22,9 @@
   "keywords": [
     "codex",
     "auto-resume",
-    "usage-limit"
+    "usage-limit",
+    "quota",
+    "primer"
   ],
   "activationEvents": [
     "onStartupFinished",
@@ -32,7 +34,12 @@
     "onCommand:codexAutoResume.resumeNow",
     "onCommand:codexAutoResume.testOfficialSubmitBridge",
     "onCommand:codexAutoResume.testOfficialUiIpcBridge",
-    "onCommand:codexAutoResume.diagnoseOfficialCodex"
+    "onCommand:codexAutoResume.diagnoseOfficialCodex",
+    "onCommand:codexAutoResume.quotaPrimer.enable",
+    "onCommand:codexAutoResume.quotaPrimer.disable",
+    "onCommand:codexAutoResume.quotaPrimer.status",
+    "onCommand:codexAutoResume.quotaPrimer.primeNow",
+    "onCommand:codexAutoResume.quotaPrimer.resetThread"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -64,6 +71,26 @@
       {
         "command": "codexAutoResume.diagnoseOfficialCodex",
         "title": "Codex Auto Resume: Diagnose Official Codex Integration"
+      },
+      {
+        "command": "codexAutoResume.quotaPrimer.enable",
+        "title": "Codex Auto Resume: Enable Quota Primer"
+      },
+      {
+        "command": "codexAutoResume.quotaPrimer.disable",
+        "title": "Codex Auto Resume: Disable Quota Primer"
+      },
+      {
+        "command": "codexAutoResume.quotaPrimer.status",
+        "title": "Codex Auto Resume: Show Quota Primer Status"
+      },
+      {
+        "command": "codexAutoResume.quotaPrimer.primeNow",
+        "title": "Codex Auto Resume: Prime Quota Now"
+      },
+      {
+        "command": "codexAutoResume.quotaPrimer.resetThread",
+        "title": "Codex Auto Resume: Reset Quota Primer Thread"
       }
     ],
     "configuration": {
@@ -107,6 +134,63 @@
           "type": "string",
           "default": "",
           "description": "Optional Codex executable override. When empty, the binary bundled with the official openai.chatgpt extension is preferred."
+        },
+        "codexAutoResume.quotaPrimer.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Prime dormant Codex quota windows after reset. Enable this on only one local/remote extension host for the same Codex account."
+        },
+        "codexAutoResume.quotaPrimer.primaryEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Prime the primary rolling quota window (normally the 5-hour window) after its reset."
+        },
+        "codexAutoResume.quotaPrimer.secondaryEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Prime the secondary rolling quota window (normally the weekly window) after its reset."
+        },
+        "codexAutoResume.quotaPrimer.pollIntervalSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 15,
+          "scope": "machine",
+          "description": "How often Quota Primer checks Codex rate-limit windows."
+        },
+        "codexAutoResume.quotaPrimer.graceSeconds": {
+          "type": "number",
+          "default": 90,
+          "minimum": 0,
+          "scope": "machine",
+          "description": "Delay after a tracked quota reset before deciding that the new rolling window is still dormant."
+        },
+        "codexAutoResume.quotaPrimer.jitterSeconds": {
+          "type": "number",
+          "default": 15,
+          "minimum": 0,
+          "scope": "machine",
+          "description": "Random preflight delay before a primer request. This reduces duplicate primers when multiple VS Code windows are running."
+        },
+        "codexAutoResume.quotaPrimer.prompt": {
+          "type": "string",
+          "default": "Quota window primer. Reply exactly OK. Do not inspect files, run tools, or modify anything.",
+          "scope": "machine",
+          "description": "Minimal prompt sent only in the dedicated Quota Primer conversation."
+        },
+        "codexAutoResume.quotaPrimer.modelPreference": {
+          "type": "string",
+          "default": "luna",
+          "scope": "machine",
+          "description": "Preferred low-cost model name or substring for Primer turns. The extension resolves it dynamically with model/list and falls back if unavailable."
+        },
+        "codexAutoResume.quotaPrimer.reasoningEffort": {
+          "type": "string",
+          "default": "lowest",
+          "scope": "machine",
+          "description": "Reasoning effort for Primer turns. Use 'lowest' to select the cheapest supported effort automatically, or provide an explicit effort name."
         }
       }
     }
