@@ -2,7 +2,7 @@
   "name": "codex-auto-resume",
   "displayName": "Codex Auto Resume",
   "description": "Automatically resume interrupted OpenAI Codex work and prime rolling quota windows after reset.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "publisher": "me2yhm",
   "private": true,
   "license": "UNLICENSED",
