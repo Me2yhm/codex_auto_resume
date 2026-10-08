@@ -117,7 +117,7 @@ export class QuotaPrimerController implements vscode.Disposable {
     const state = this.state();
     if (!this.enabled()) {
       void vscode.window.showInformationMessage(
-        `Codex Quota Primer is disabled.${state.threadId ? ` Dedicated thread: ${state.threadId}.` : ""}`,
+        `Codex Quota Primer is disabled. Prime Quota Now is a manual smoke test and does not enable automatic priming.${state.threadId ? ` Dedicated thread: ${state.threadId}${state.threadCwd ? ` (workspace: ${state.threadCwd})` : ""}.` : ""}`,
       );
       return;
     }
@@ -129,7 +129,7 @@ export class QuotaPrimerController implements vscode.Disposable {
       : "";
 
     void vscode.window.showInformationMessage(
-      `Codex Quota Primer is enabled. Thread: ${state.threadId ?? "<not created yet>"}. Model: ${state.model ?? "<not selected yet>"}${state.effort ? ` / ${state.effort}` : ""}. ${primary}; ${secondary}.${pending}`,
+      `Codex Quota Primer is enabled. Thread: ${state.threadId ?? "<not created yet>"}${state.threadCwd ? ` (workspace: ${state.threadCwd})` : ""}. Model: ${state.model ?? "<not selected yet>"}${state.effort ? ` / ${state.effort}` : ""}. ${primary}; ${secondary}.${pending}`,
     );
   }
 
@@ -172,6 +172,7 @@ export class QuotaPrimerController implements vscode.Disposable {
     await this.saveState({
       ...state,
       threadId: undefined,
+      threadCwd: undefined,
       model: undefined,
       effort: undefined,
       pendingConfirmation: undefined,
@@ -440,9 +441,10 @@ export class QuotaPrimerController implements vscode.Disposable {
     const writer = this.createPrimerWriter();
     try {
       await writer.start();
+      const threadCwd = this.primerThreadCwd();
       const started = await writer.request<ThreadStartResponse>("thread/start", {
         model: model.model,
-        cwd: os.homedir(),
+        cwd: threadCwd,
         serviceName: PRIMER_THREAD_SOURCE,
         threadSource: PRIMER_THREAD_SOURCE,
         ephemeral: false,
@@ -452,6 +454,7 @@ export class QuotaPrimerController implements vscode.Disposable {
       await this.saveState({
         ...this.state(),
         threadId,
+        threadCwd,
         model: model.model,
         effort: model.effort,
       });
@@ -468,18 +471,17 @@ export class QuotaPrimerController implements vscode.Disposable {
       }
 
       this.output.appendLine(
-        `[quota-primer] created dedicated primer thread ${threadId} using ${model.model}${model.effort ? ` / ${model.effort}` : ""}`,
+        `[quota-primer] created dedicated primer thread ${threadId} using ${model.model}${model.effort ? ` / ${model.effort}` : ""}; cwd=${threadCwd}; source=${formatThreadSource(started.thread.source)}; originator=${started.thread.originator ?? "<none>"}`,
       );
 
-      const response = await writer.request<TurnStartResponse>("turn/start", {
+      const turn = await startPrimerTurnAndWait(
+        writer,
         threadId,
-        input: [{ type: "text", text: prompt, text_elements: [] }],
-        model: model.model,
-        ...(model.effort ? { effort: model.effort } : {}),
-      }, 30_000);
-
-      const turn = await waitForTurnTerminal(writer, threadId, response.turn.id, this.output);
-      return { threadId, turn: turn ?? response.turn };
+        prompt,
+        model,
+        this.output,
+      );
+      return { threadId, turn };
     } finally {
       writer.dispose();
     }
@@ -494,16 +496,20 @@ export class QuotaPrimerController implements vscode.Disposable {
     try {
       await writer.start();
       await writer.request("thread/resume", { threadId }, 20_000);
-      const response = await writer.request<TurnStartResponse>("turn/start", {
+      return await startPrimerTurnAndWait(
+        writer,
         threadId,
-        input: [{ type: "text", text: prompt, text_elements: [] }],
-        model: model.model,
-        ...(model.effort ? { effort: model.effort } : {}),
-      }, 30_000);
-      return await waitForTurnTerminal(writer, threadId, response.turn.id, this.output) ?? response.turn;
+        prompt,
+        model,
+        this.output,
+      );
     } finally {
       writer.dispose();
     }
+  }
+
+  private primerThreadCwd(): string {
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
   }
 
   private createPrimerWriter(): CodexRpcClient {
@@ -871,43 +877,99 @@ function chooseReasoningEffort(model: CodexModel, preference: string): string | 
   )[0];
 }
 
-async function waitForTurnTerminal(
+async function startPrimerTurnAndWait(
   client: CodexRpcClient,
   threadId: string,
-  turnId: string,
+  prompt: string,
+  model: PrimerModelChoice,
   output: vscode.OutputChannel,
 ): Promise<CodexTurn | undefined> {
-  for (let attempt = 1; attempt <= 30; attempt += 1) {
-    await delay(1_000);
-    const response = await client.request<ThreadTurnsListResponse>("thread/turns/list", {
+  let completedNotification: CodexTurn | undefined;
+  const onNotification = (method: string, params: unknown): void => {
+    if (method !== "turn/completed") return;
+    const record = asRecord(params);
+    if (!record || record.threadId !== threadId) return;
+    const turn = asRecord(record.turn);
+    if (!turn || typeof turn.id !== "string") return;
+    completedNotification = turn as unknown as CodexTurn;
+  };
+  client.on("notification", onNotification);
+
+  try {
+    const response = await client.request<TurnStartResponse>("turn/start", {
       threadId,
-      limit: 20,
-      sortDirection: "desc",
-      itemsView: "summary",
-    });
-    const turn = response.data.find((item) => item.id === turnId);
-    if (!turn) continue;
-    if (
-      turn.status === "completed" ||
-      turn.status === "failed" ||
-      (turn.status === "interrupted" && Boolean(turn.error))
-    ) {
-      output.appendLine(
-        `[quota-primer] direct primer turn ${turnId} finished with status=${turn.status}`,
-      );
-      return turn;
+      input: [{ type: "text", text: prompt, text_elements: [] }],
+      model: model.model,
+      ...(model.effort ? { effort: model.effort } : {}),
+    }, 30_000);
+
+    let lastStatus: string | undefined;
+    for (let attempt = 1; attempt <= 120; attempt += 1) {
+      if (completedNotification?.id === response.turn.id) {
+        output.appendLine(
+          `[quota-primer] direct primer turn ${response.turn.id} completed via turn/completed notification; status=${completedNotification.status}`,
+        );
+        return completedNotification;
+      }
+
+      await delay(1_000);
+      const turns = await client.request<ThreadTurnsListResponse>("thread/turns/list", {
+        threadId,
+        limit: 20,
+        sortDirection: "desc",
+        itemsView: "summary",
+      });
+      const turn = turns.data.find((item) => item.id === response.turn.id);
+      if (!turn) continue;
+
+      if (turn.status !== lastStatus) {
+        lastStatus = turn.status;
+        output.appendLine(
+          `[quota-primer] direct primer turn ${turn.id} observed status=${turn.status}; error=${formatPrimerTurnError(turn)}`,
+        );
+      }
+
+      if (
+        turn.status === "completed" ||
+        turn.status === "failed" ||
+        (turn.status === "interrupted" && Boolean(turn.error))
+      ) {
+        return turn;
+      }
+
+      if (turn.status === "interrupted" && !turn.error) {
+        continue;
+      }
     }
-    if (turn.status === "interrupted" && !turn.error) {
-      // A newly-started Codex turn can briefly be persisted as
-      // interrupted/error=null while the owner catches up. Treat it as a
-      // transient observation, matching Auto Resume's verification logic.
-      continue;
-    }
+
+    output.appendLine(
+      `[quota-primer] direct primer turn ${response.turn.id} did not reach a terminal state within 120s; treating the attempt as unconfirmed instead of reporting success`,
+    );
+    return undefined;
+  } finally {
+    client.off("notification", onNotification);
   }
-  output.appendLine(
-    `[quota-primer] direct primer turn ${turnId} did not reach a terminal state within 30s; releasing the one-shot writer`,
-  );
-  return undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function formatPrimerTurnError(turn: CodexTurn): string {
+  const info = turn.error?.codexErrorInfo;
+  if (typeof info === "string") return info;
+  if (info) return JSON.stringify(info);
+  return turn.error?.message ?? "none";
+}
+
+function formatThreadSource(source: unknown): string {
+  if (typeof source === "string") return source;
+  try {
+    return JSON.stringify(source);
+  } catch {
+    return "<unknown>";
+  }
 }
 
 function classifyPrimerQuotaError(turn: CodexTurn | undefined): string | undefined {
