@@ -42,7 +42,13 @@ Quota Window Primer watches the primary and secondary Codex quota reset times. A
 
 If both the primary and secondary windows reset together, only **one** primer request is sent.
 
-If you already used Codex and the account reports a new future reset time, Primer does nothing.
+Primer does not treat every future `resetAt` as proof that a new rolling window is active. After a reset, Codex can report a dormant window whose `resetAt` moves forward with wall-clock time (approximately `now + windowDuration`). The extension therefore samples the window across polls:
+
+- a **moving** `resetAt` means the window is still dormant and should be primed;
+- a **fixed** `resetAt` means a real Codex request has already started the new window, so Primer skips it;
+- an ambiguous sample is left pending until another observation is available.
+
+After sending a primer, the extension uses the same rule in reverse: the window is only confirmed as activated once `resetAt` stops moving.
 
 ### Dedicated conversation
 
