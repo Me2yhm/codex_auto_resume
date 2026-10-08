@@ -784,7 +784,7 @@ export class QuotaPrimerController implements vscode.Disposable {
       {
         name: "codex-auto-resume-primer",
         title: "Codex Auto Resume Quota Primer",
-        version: "0.3.2",
+        version: "0.3.6",
       },
     );
   }
@@ -805,14 +805,26 @@ export class QuotaPrimerController implements vscode.Disposable {
     const cheapFallback = models
       .filter((item) => cheapModelScore(item) > 0)
       .sort((a, b) => cheapModelScore(b) - cheapModelScore(a))[0];
-    const defaultModel = models.find((item) => item.isDefault);
-    const selected = exact ?? contains[0] ?? cheapFallback ?? defaultModel ?? models.find((item) => !item.hidden) ?? models[0];
-    const fallback = !exact && contains.length === 0;
+
+    let selected = exact ?? contains[0];
+    let fallback = false;
+
+    if (!selected) {
+      if (!this.allowModelFallback()) {
+        throw new Error(
+          `Preferred Primer model "${this.modelPreference()}" is unavailable. Automatic priming was skipped rather than silently using a potentially more expensive model.`,
+        );
+      }
+
+      const defaultModel = models.find((item) => item.isDefault);
+      selected = cheapFallback ?? defaultModel ?? models.find((item) => !item.hidden) ?? models[0];
+      fallback = true;
+    }
 
     const effort = chooseReasoningEffort(selected, this.effortPreference());
     if (fallback) {
       this.output.appendLine(
-        `[quota-primer] preferred model "${this.modelPreference()}" is unavailable; falling back to ${selected.model} (${selected.displayName})`,
+        `[quota-primer] preferred model "${this.modelPreference()}" is unavailable; explicit fallback is enabled, using ${selected.model} (${selected.displayName})`,
       );
     } else {
       this.output.appendLine(
@@ -1033,6 +1045,12 @@ export class QuotaPrimerController implements vscode.Disposable {
       .getConfiguration("codexAutoResume")
       .get<string>("quotaPrimer.reasoningEffort", "lowest")
       .trim() || "lowest";
+  }
+
+  private allowModelFallback(): boolean {
+    return vscode.workspace
+      .getConfiguration("codexAutoResume")
+      .get<boolean>("quotaPrimer.allowModelFallback", false);
   }
 
   private logObservation(state: QuotaPrimerState, limits: RateLimitSnapshot | null): void {
