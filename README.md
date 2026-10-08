@@ -8,7 +8,10 @@ The user-facing extension documentation is kept separately in [README.extension.
 
 The project provides unattended recovery for VS Code Codex tasks interrupted by usage limits.
 
-The implementation monitors Codex quota/thread state, persists the interrupted thread, waits for the reported reset, surfaces the exact conversation, resumes it through the official Codex UI IPC path, and verifies the resumed turn before disarming.
+The implementation has two independent automation paths:
+
+- **Auto Resume** monitors Codex quota/thread state, persists an interrupted work thread, waits for the reported reset, surfaces the exact conversation, resumes it through the official Codex UI IPC path, and verifies the resumed turn before disarming.
+- **Quota Window Primer** tracks primary/secondary rolling reset boundaries and, when a reset would otherwise remain dormant, sends one tiny request in a dedicated persistent low-cost-model thread so the next rolling window starts immediately.
 
 ## Project layout
 
@@ -19,6 +22,9 @@ src/
   codexRpcClient.ts         read-only Codex app-server client
   codexUiIpcClient.ts       Codex UI IPC follower client
   codexLocator.ts           locates the Codex executable
+  quotaPrimerController.ts  quota-window priming state machine
+  quotaPrimerState.ts       persistent primer state
+  officialCodexUi.ts        shared UI IPC transport
   types.ts                  minimal protocol types
 
 scripts/windows/
