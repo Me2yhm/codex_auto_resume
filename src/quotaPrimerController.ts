@@ -10,7 +10,6 @@ import {
   QuotaPrimerWindowState,
 } from "./quotaPrimerState";
 import {
-  ArmedResume,
   CodexThread,
   CodexTurn,
   RateLimitSnapshot,
@@ -365,7 +364,11 @@ export class QuotaPrimerController implements vscode.Disposable {
 
     if (pending.turnId && state.threadId) {
       const turn = await this.turnById(state.threadId, pending.turnId);
-      const reason = classifyPrimerQuotaError(turn);
+      const explicitReason = classifyPrimerQuotaError(turn);
+      const quotaBlockedWithoutStructuredError =
+        Boolean(turn && (turn.status === "interrupted" || turn.status === "failed")) &&
+        this.quotaLooksBlocked(limits);
+      const reason = explicitReason ?? (quotaBlockedWithoutStructuredError ? "rateLimitReached" : undefined);
       if (reason) {
         this.output.appendLine(
           `[quota-primer] primer turn ${pending.turnId} was quota-blocked (${reason}); clearing the attempt and waiting for the blocker to clear`,
@@ -875,11 +878,21 @@ async function waitForTurnTerminal(
     });
     const turn = response.data.find((item) => item.id === turnId);
     if (!turn) continue;
-    if (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted") {
+    if (
+      turn.status === "completed" ||
+      turn.status === "failed" ||
+      (turn.status === "interrupted" && Boolean(turn.error))
+    ) {
       output.appendLine(
         `[quota-primer] direct primer turn ${turnId} finished with status=${turn.status}`,
       );
       return turn;
+    }
+    if (turn.status === "interrupted" && !turn.error) {
+      // A newly-started Codex turn can briefly be persisted as
+      // interrupted/error=null while the owner catches up. Treat it as a
+      // transient observation, matching Auto Resume's verification logic.
+      continue;
     }
   }
   output.appendLine(
