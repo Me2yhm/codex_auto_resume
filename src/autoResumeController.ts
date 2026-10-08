@@ -1,7 +1,8 @@
 import * as vscode from "vscode";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
-import { CodexUiIpcClient, readCodexUiIpcVersions } from "./codexUiIpc";
+import { sendTurnThroughOfficialCodexUi } from "./officialCodexUi";
+import { QUOTA_PRIMER_STATE_KEY, QuotaPrimerState } from "./quotaPrimerState";
 import { addTextToOfficialCodexThread, tryNativeChatSubmit } from "./officialCodexBridge";
 import {
   ArmedResume,
@@ -393,53 +394,7 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   private async sendThroughOfficialUi(threadId: string, prompt: string, logPrefix: string): Promise<boolean> {
-    await this.surfaceOfficialThread(threadId, logPrefix);
-
-    const versions = readCodexUiIpcVersions(this.output);
-    const ipc = new CodexUiIpcClient(this.output);
-    try {
-      await ipc.connect();
-      let ownerClientId: string | undefined;
-      for (let attempt = 1; attempt <= 5; attempt += 1) {
-        ownerClientId = await ipc.discoverOwner(threadId, versions.ownerDiscovery);
-        this.output.appendLine(`[${logPrefix}] owner discovery ${attempt}/5: ${ownerClientId ?? "<none>"}`);
-        if (ownerClientId) break;
-        await delay(1000);
-      }
-      if (!ownerClientId) return false;
-      await ipc.startTurn(threadId, prompt, versions, ownerClientId);
-      return true;
-    } finally {
-      ipc.dispose();
-    }
-  }
-
-  private async surfaceOfficialThread(threadId: string, logPrefix: string): Promise<void> {
-    this.output.appendLine(`[${logPrefix}] surfacing official Codex thread ${threadId}`);
-
-    try {
-      await vscode.commands.executeCommand("chatgpt.openSidebar", { threadId });
-    } catch (error) {
-      this.output.appendLine(
-        `[${logPrefix}] chatgpt.openSidebar(threadId) failed: ${(error as Error).message}; falling back to plain openSidebar`,
-      );
-      await vscode.commands.executeCommand("chatgpt.openSidebar");
-    }
-
-    try {
-      const route = vscode.Uri.file(`/local/${threadId}`).with({
-        scheme: "openai-codex",
-        authority: "route",
-      });
-      await vscode.commands.executeCommand("vscode.openWith", route, "chatgpt.conversationEditor");
-      this.output.appendLine(`[${logPrefix}] mounted target thread through chatgpt.conversationEditor`);
-    } catch (error) {
-      this.output.appendLine(
-        `[${logPrefix}] exact-thread custom editor mount unavailable: ${(error as Error).message}; continuing with sidebar owner discovery`,
-      );
-    }
-
-    await delay(1500);
+    return sendTurnThroughOfficialCodexUi(threadId, prompt, this.output, logPrefix);
   }
 
   private scheduleNextTick(): void {
@@ -461,7 +416,8 @@ export class AutoResumeController implements vscode.Disposable {
       sortDirection: "desc",
       itemsView: "summary",
     });
-    return response.data[0];
+    const primerThreadId = this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY)?.threadId;
+    return response.data.find((thread) => thread.id !== primerThreadId);
   }
 
   private async turnById(threadId: string, turnId: string): Promise<CodexTurn | undefined> {
