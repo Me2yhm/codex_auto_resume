@@ -2,6 +2,7 @@ import * as os from "os";
 import * as vscode from "vscode";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
+import { tryAcquireQuotaPrimerSendLock } from "./quotaPrimerLock";
 import {
   sendTurnThroughOfficialCodexUi,
   trySendTurnThroughExistingOfficialOwner,
@@ -294,54 +295,75 @@ export class QuotaPrimerController implements vscode.Disposable {
         await delay(jitterMs);
       }
 
-      limits = await this.readRateLimits();
-      state = this.reconcileTracking(this.state(), limits);
-      if (this.quotaLooksBlocked(limits) || await this.hasActiveCodexThread(state.threadId)) {
-        this.output.appendLine(
-          "[quota-primer] final preflight no longer permits a primer; keeping the dormant boundary pending",
-        );
-        await this.saveState(state);
-        return;
-      }
-
-      const result = await this.sendPrimer(state, "quota-primer");
-      if (!result.turn || !primerTurnAccepted(result.turn)) {
-        if (result.turn) {
-          this.output.appendLine(
-            `[quota-primer] primer turn ${result.turn.id} was not accepted as successful; status=${result.turn.status}; error=${formatPrimerTurnError(result.turn)}; keeping the dormant boundary pending`,
-          );
-        }
-        await this.saveState(this.state());
-        return;
-      }
-
-      const confirmationLimits = await this.readRateLimits();
-      const confirmationObservedAtMs = Date.now();
-      const pending: QuotaPrimerPendingConfirmation = {
-        primaryResetAtMs: dormant.primary,
-        secondaryResetAtMs: dormant.secondary,
-        primaryProbeObservedAtMs: dormant.primary ? confirmationObservedAtMs : undefined,
-        primaryProbeResetAtMs: dormant.primary
-          ? resetAtMs(confirmationLimits?.primary ?? null)
-          : undefined,
-        secondaryProbeObservedAtMs: dormant.secondary ? confirmationObservedAtMs : undefined,
-        secondaryProbeResetAtMs: dormant.secondary
-          ? resetAtMs(confirmationLimits?.secondary ?? null)
-          : undefined,
-        turnId: result.turn.id,
-        sentAtMs: Date.now(),
-      };
-      state = {
-        ...this.state(),
-        model: result.model.model,
-        effort: result.model.effort,
-        pendingConfirmation: pending,
-        lastPrimeAtMs: Date.now(),
-      };
-      await this.saveState(state);
-      this.output.appendLine(
-        `[quota-primer] sent one primer turn ${result.turn.id} for dormant ${formatDueWindows(dormant)} window(s); confirmation now requires resetAt to stop moving`,
+      const sendLock = await tryAcquireQuotaPrimerSendLock(
+        this.context.globalStorageUri.fsPath,
+        this.output,
       );
+      if (!sendLock) return;
+
+      try {
+        // Re-read shared state only after acquiring the same-host lock. Another
+        // VS Code window may have sent a primer while this instance was waiting
+        // in jitter or lock contention.
+        const sharedState = this.state();
+        if (sharedState.pendingConfirmation) {
+          this.output.appendLine(
+            `[quota-primer] another extension host already has primer turn ${sharedState.pendingConfirmation.turnId ?? "<unknown>"} awaiting confirmation; skipping this send`,
+          );
+          return;
+        }
+
+        limits = await this.readRateLimits();
+        state = this.reconcileTracking(sharedState, limits);
+        if (this.quotaLooksBlocked(limits) || await this.hasActiveCodexThread(state.threadId)) {
+          this.output.appendLine(
+            "[quota-primer] final preflight no longer permits a primer; keeping the dormant boundary pending",
+          );
+          await this.saveState(state);
+          return;
+        }
+
+        const result = await this.sendPrimer(state, "quota-primer");
+        if (!result.turn || !primerTurnAccepted(result.turn)) {
+          if (result.turn) {
+            this.output.appendLine(
+              `[quota-primer] primer turn ${result.turn.id} was not accepted as successful; status=${result.turn.status}; error=${formatPrimerTurnError(result.turn)}; keeping the dormant boundary pending`,
+            );
+          }
+          await this.saveState(this.state());
+          return;
+        }
+
+        const confirmationLimits = await this.readRateLimits();
+        const confirmationObservedAtMs = Date.now();
+        const pending: QuotaPrimerPendingConfirmation = {
+          primaryResetAtMs: dormant.primary,
+          secondaryResetAtMs: dormant.secondary,
+          primaryProbeObservedAtMs: dormant.primary ? confirmationObservedAtMs : undefined,
+          primaryProbeResetAtMs: dormant.primary
+            ? resetAtMs(confirmationLimits?.primary ?? null)
+            : undefined,
+          secondaryProbeObservedAtMs: dormant.secondary ? confirmationObservedAtMs : undefined,
+          secondaryProbeResetAtMs: dormant.secondary
+            ? resetAtMs(confirmationLimits?.secondary ?? null)
+            : undefined,
+          turnId: result.turn.id,
+          sentAtMs: Date.now(),
+        };
+        state = {
+          ...this.state(),
+          model: result.model.model,
+          effort: result.model.effort,
+          pendingConfirmation: pending,
+          lastPrimeAtMs: Date.now(),
+        };
+        await this.saveState(state);
+        this.output.appendLine(
+          `[quota-primer] sent one primer turn ${result.turn.id} for dormant ${formatDueWindows(dormant)} window(s); confirmation now requires resetAt to stop moving`,
+        );
+      } finally {
+        await sendLock.release();
+      }
     } catch (error) {
       this.output.appendLine(`[quota-primer] tick failed: ${(error as Error).message}`);
       this.client?.dispose();
