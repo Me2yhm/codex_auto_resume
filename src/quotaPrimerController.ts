@@ -391,32 +391,41 @@ export class QuotaPrimerController implements vscode.Disposable {
     const prompt = this.prompt();
 
     if (state.threadId) {
-      const before = await this.latestTurnSafe(state.threadId);
-      const sent = await sendTurnThroughOfficialCodexUi(
-        state.threadId,
-        prompt,
-        this.output,
-        logPrefix,
-        { model: model.model, effort: model.effort },
-      );
-      if (sent) {
-        const turn = await this.waitForNewTurn(state.threadId, before?.id, logPrefix);
-        return { threadId: state.threadId, turn, model };
-      }
-
-      this.output.appendLine(
-        `[${logPrefix}] official UI owner was unavailable for primer thread ${state.threadId}; trying a one-shot app-server writer fallback`,
-      );
       try {
+        // Primer is intentionally silent: prefer a short-lived app-server
+        // writer so quota priming does not steal focus or switch the user's
+        // visible Codex conversation.
         const turn = await this.writePrimerTurnDirect(state.threadId, prompt, model);
         return { threadId: state.threadId, turn, model };
       } catch (error) {
         const message = (error as Error).message;
         this.output.appendLine(`[${logPrefix}] direct primer resume failed: ${message}`);
-        if (!looksLikeMissingThread(message)) return { threadId: state.threadId, model };
-        this.output.appendLine(
-          `[${logPrefix}] stored primer thread no longer exists; creating a new dedicated primer conversation`,
-        );
+
+        if (looksLikeMissingThread(message)) {
+          this.output.appendLine(
+            `[${logPrefix}] stored primer thread no longer exists; creating a new dedicated primer conversation`,
+          );
+        } else if (looksLikeWriterConflict(message)) {
+          // If the user has deliberately opened the primer thread, the
+          // official Codex UI may own its writer lock. In that uncommon case,
+          // route the turn through the existing UI owner instead of competing
+          // for the lock.
+          const before = await this.latestTurnSafe(state.threadId);
+          const sent = await sendTurnThroughOfficialCodexUi(
+            state.threadId,
+            prompt,
+            this.output,
+            logPrefix,
+            { model: model.model, effort: model.effort },
+          );
+          if (sent) {
+            const turn = await this.waitForNewTurn(state.threadId, before?.id, logPrefix);
+            return { threadId: state.threadId, turn, model };
+          }
+          return { threadId: state.threadId, model };
+        } else {
+          return { threadId: state.threadId, model };
+        }
       }
     }
 
@@ -910,6 +919,11 @@ function classifyPrimerQuotaError(turn: CodexTurn | undefined): string | undefin
 function looksLikeMissingThread(message: string): boolean {
   const value = message.toLowerCase();
   return value.includes("not found") || value.includes("missing") || value.includes("no rollout");
+}
+
+function looksLikeWriterConflict(message: string): boolean {
+  const value = message.toLowerCase();
+  return value.includes("active writer") || value.includes("thread-store conflict") || value.includes("writer lock");
 }
 
 function formatTrackedWindow(name: string, state: QuotaPrimerWindowState | undefined): string {
