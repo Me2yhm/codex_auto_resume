@@ -17,6 +17,7 @@ export interface QuotaPrimerPendingConfirmation {
   secondaryProbeResetAtMs?: number;
   turnId?: string;
   sentAtMs: number;
+  stalledWarningLogged?: boolean;
 }
 
 export interface QuotaPrimerState {
