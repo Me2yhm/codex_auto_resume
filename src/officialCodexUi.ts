@@ -33,6 +33,30 @@ export async function sendTurnThroughOfficialCodexUi(
   }
 }
 
+
+export async function trySendTurnThroughExistingOfficialOwner(
+  threadId: string,
+  prompt: string,
+  output: vscode.OutputChannel,
+  logPrefix: string,
+  overrides: CodexTurnStartOverrides = {},
+): Promise<boolean> {
+  const versions = readCodexUiIpcVersions(output);
+  const ipc = new CodexUiIpcClient(output);
+  try {
+    await ipc.connect();
+    const ownerClientId = await ipc.discoverOwner(threadId, versions.ownerDiscovery);
+    output.appendLine(
+      `[${logPrefix}] silent owner discovery: ${ownerClientId ?? "<none>"}`,
+    );
+    if (!ownerClientId) return false;
+    await ipc.startTurn(threadId, prompt, versions, ownerClientId, overrides);
+    return true;
+  } finally {
+    ipc.dispose();
+  }
+}
+
 export async function surfaceOfficialCodexThread(
   threadId: string,
   output: vscode.OutputChannel,
