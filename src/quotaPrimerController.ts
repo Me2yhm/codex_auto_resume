@@ -2,7 +2,10 @@ import * as os from "os";
 import * as vscode from "vscode";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
-import { sendTurnThroughOfficialCodexUi } from "./officialCodexUi";
+import {
+  sendTurnThroughOfficialCodexUi,
+  trySendTurnThroughExistingOfficialOwner,
+} from "./officialCodexUi";
 import {
   QUOTA_PRIMER_STATE_KEY,
   QuotaPrimerPendingConfirmation,
@@ -25,6 +28,8 @@ const RESET_ADVANCE_TOLERANCE_MS = 60_000;
 const RESET_JITTER_TOLERANCE_MS = 5_000;
 const PRIMER_CONFIRMATION_POLL_MS = 1_000;
 const PRIMER_CONFIRMATION_POLLS = 12;
+const UI_PRIMER_STABILITY_MS = 15_000;
+const UI_PRIMER_CONFIRMATION_POLLS = 120;
 
 interface CodexModel {
   id: string;
@@ -392,10 +397,30 @@ export class QuotaPrimerController implements vscode.Disposable {
     const prompt = this.prompt();
 
     if (state.threadId) {
+      const before = await this.latestTurnSafe(state.threadId);
+
+      // First ask the Codex UI router whether the official client already owns
+      // this thread. If it does, send through that owner without surfacing the
+      // conversation, so automatic priming stays invisible to the user.
+      const sentSilently = await trySendTurnThroughExistingOfficialOwner(
+        state.threadId,
+        prompt,
+        this.output,
+        logPrefix,
+        { model: model.model, effort: model.effort },
+      );
+      if (sentSilently) {
+        const turn = await this.waitForUiPrimerTurn(
+          state.threadId,
+          before?.id,
+          logPrefix,
+        );
+        return { threadId: state.threadId, turn, model };
+      }
+
       try {
-        // Primer is intentionally silent: prefer a short-lived app-server
-        // writer so quota priming does not steal focus or switch the user's
-        // visible Codex conversation.
+        // No official UI owner currently has the thread mounted. A short-lived
+        // writer can therefore resume it without changing the visible Codex UI.
         const turn = await this.writePrimerTurnDirect(state.threadId, prompt, model);
         return { threadId: state.threadId, turn, model };
       } catch (error) {
@@ -407,11 +432,9 @@ export class QuotaPrimerController implements vscode.Disposable {
             `[${logPrefix}] stored primer thread no longer exists; creating a new dedicated primer conversation`,
           );
         } else if (looksLikeWriterConflict(message)) {
-          // If the user has deliberately opened the primer thread, the
-          // official Codex UI may own its writer lock. In that uncommon case,
-          // route the turn through the existing UI owner instead of competing
-          // for the lock.
-          const before = await this.latestTurnSafe(state.threadId);
+          // A race can occur between silent owner discovery and acquiring the
+          // writer lock. Surface the exact thread only as the final recovery
+          // path, then route through the official owner.
           const sent = await sendTurnThroughOfficialCodexUi(
             state.threadId,
             prompt,
@@ -420,7 +443,11 @@ export class QuotaPrimerController implements vscode.Disposable {
             { model: model.model, effort: model.effort },
           );
           if (sent) {
-            const turn = await this.waitForNewTurn(state.threadId, before?.id, logPrefix);
+            const turn = await this.waitForUiPrimerTurn(
+              state.threadId,
+              before?.id,
+              logPrefix,
+            );
             return { threadId: state.threadId, turn, model };
           }
           return { threadId: state.threadId, model };
@@ -626,19 +653,77 @@ export class QuotaPrimerController implements vscode.Disposable {
     }
   }
 
-  private async waitForNewTurn(
+  private async waitForUiPrimerTurn(
     threadId: string,
     beforeTurnId: string | undefined,
     logPrefix: string,
   ): Promise<CodexTurn | undefined> {
-    for (let attempt = 1; attempt <= 12; attempt += 1) {
+    let turnId: string | undefined;
+    let stableSinceMs: number | undefined;
+    let lastStatus: string | undefined;
+
+    for (let attempt = 1; attempt <= UI_PRIMER_CONFIRMATION_POLLS; attempt += 1) {
       await delay(1_000);
-      const after = await this.latestTurnSafe(threadId);
-      this.output.appendLine(
-        `[${logPrefix}] verification ${attempt}/12 latest primer turn: ${after?.id ?? "<none>"}`,
-      );
-      if (after?.id && after.id !== beforeTurnId) return after;
+
+      if (!turnId) {
+        const latest = await this.latestTurnSafe(threadId);
+        if (!latest?.id || latest.id === beforeTurnId) {
+          if (attempt <= 12) {
+            this.output.appendLine(
+              `[${logPrefix}] verification ${attempt}/12 waiting for a new primer turn`,
+            );
+          }
+          continue;
+        }
+        turnId = latest.id;
+        this.output.appendLine(
+          `[${logPrefix}] primer turn ${turnId} appeared on the dedicated thread; entering second-stage verification`,
+        );
+      }
+
+      const turn = await this.turnById(threadId, turnId);
+      if (!turn) continue;
+
+      if (turn.status !== lastStatus) {
+        lastStatus = turn.status;
+        this.output.appendLine(
+          `[${logPrefix}] primer turn ${turn.id} status=${turn.status}; error=${formatPrimerTurnError(turn)}`,
+        );
+      }
+
+      if (turn.status === "completed") {
+        this.output.appendLine(
+          `[${logPrefix}] primer turn ${turn.id} confirmed completed`,
+        );
+        return turn;
+      }
+
+      if (turn.status === "failed" || (turn.status === "interrupted" && Boolean(turn.error))) {
+        this.output.appendLine(
+          `[${logPrefix}] primer turn ${turn.id} ended unsuccessfully; status=${turn.status}; error=${formatPrimerTurnError(turn)}`,
+        );
+        return turn;
+      }
+
+      if (turn.status === "inProgress") {
+        stableSinceMs ??= Date.now();
+        if (Date.now() - stableSinceMs >= UI_PRIMER_STABILITY_MS) {
+          this.output.appendLine(
+            `[${logPrefix}] primer turn ${turn.id} remained in progress without an error for ${UI_PRIMER_STABILITY_MS / 1_000}s; accepting it as stably started`,
+          );
+          return turn;
+        }
+        continue;
+      }
+
+      // interrupted/error=null is a transient state observed in Codex history
+      // while the official owner catches up. It is neither success nor failure.
+      stableSinceMs = undefined;
     }
+
+    this.output.appendLine(
+      `[${logPrefix}] primer turn verification timed out after ${UI_PRIMER_CONFIRMATION_POLLS}s; treating the attempt as unconfirmed`,
+    );
     return undefined;
   }
 
