@@ -767,6 +767,7 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   private quotaLooksBlocked(limits: RateLimitSnapshot | null): boolean {
+    if (this.ordinaryUsageAllowed === false) return true;
     if (!limits) return false;
     if (limits.rateLimitReachedType) return true;
     const windows = [limits.primary, limits.secondary].filter(
@@ -776,8 +777,13 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   private quotaLooksAvailable(limits: RateLimitSnapshot | null): boolean {
+    if (this.ordinaryUsageAllowed === true) return true;
+    if (this.ordinaryUsageAllowed === false || this.ordinaryUsageAllowed === null) return false;
     if (!limits) return false;
     if (limits.rateLimitReachedType) return false;
+
+    // Older app-server versions do not expose ordinaryUsageAllowed. Preserve
+    // compatibility there by falling back to the historical percentage check.
     const windows = [limits.primary, limits.secondary].filter(
       (window): window is NonNullable<typeof window> => Boolean(window),
     );
@@ -809,6 +815,12 @@ export class AutoResumeController implements vscode.Disposable {
     }
     const armed = this.armed();
     if (!armed) {
+      const pending = this.pendingQuotaCandidate();
+      if (pending) {
+        this.statusBar.text = "$(sync) Codex Resume: Quota Check";
+        this.statusBar.tooltip = `Interrupted turn ${pending.turnId} is waiting for account quota confirmation`;
+        return;
+      }
       this.statusBar.text = "$(eye) Codex Resume: Monitoring";
       this.statusBar.tooltip = "Watching for a Codex usage-limit interruption";
       return;
