@@ -123,7 +123,7 @@ quota interruption
 
 Boundary testing also covers thread switching, Extension Host restart persistence, and two-stage resume verification.
 
-Remote SSH uses the same extension package but is validated separately because the Codex executable and IPC endpoint are provided by the remote environment.
+Remote SSH uses the same extension package but is validated separately because the Codex executable, account-network path, and IPC endpoint are provided by the remote environment. Version 0.3.7 makes account quota reads best-effort on Remote SSH: thread-store interruption observation continues across account endpoint timeouts, and ambiguous interrupted turns are persisted until quota state can confirm or reject them.
 
 ## Packaging files
 
