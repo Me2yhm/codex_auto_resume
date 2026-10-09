@@ -20,6 +20,7 @@ export interface RateLimitSnapshot {
 }
 
 export interface RateLimitsReadResponse {
+  ordinaryUsageAllowed?: boolean | null;
   rateLimits: RateLimitSnapshot | null;
   rateLimitsByLimitId?: Record<string, RateLimitSnapshot> | null;
 }
@@ -87,4 +88,11 @@ export interface ArmedResume {
   // if VS Code restarts while the resumed turn is still being classified.
   resumeTurnId?: string;
   resumeStartedAtMs?: number;
+}
+
+export interface PendingQuotaInterruption {
+  threadId: string;
+  cwd: string;
+  turnId: string;
+  observedAtMs: number;
 }
