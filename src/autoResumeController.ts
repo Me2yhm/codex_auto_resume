@@ -79,6 +79,7 @@ export class AutoResumeController implements vscode.Disposable {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     await this.context.workspaceState.update(STATE_KEY, undefined);
+    await this.context.workspaceState.update(PENDING_QUOTA_CANDIDATE_KEY, undefined);
     this.renderStatus();
     void vscode.window.showInformationMessage("Codex Auto Resume disabled.");
   }
@@ -90,6 +91,13 @@ export class AutoResumeController implements vscode.Disposable {
       return;
     }
     if (!armed) {
+      const pending = this.pendingQuotaCandidate();
+      if (pending) {
+        void vscode.window.showInformationMessage(
+          `Codex Auto Resume is monitoring an interrupted turn ${pending.turnId} on thread ${pending.threadId}, but account quota state is temporarily unavailable. It will arm only after quota interruption is confirmed.`,
+        );
+        return;
+      }
       void vscode.window.showInformationMessage("Codex Auto Resume is enabled and monitoring; no interrupted thread is armed.");
       return;
     }
@@ -199,6 +207,14 @@ export class AutoResumeController implements vscode.Disposable {
 
   private armed(): ArmedResume | undefined {
     return this.context.workspaceState.get<ArmedResume>(STATE_KEY);
+  }
+
+  private pendingQuotaCandidate(): PendingQuotaInterruption | undefined {
+    return this.context.workspaceState.get<PendingQuotaInterruption>(PENDING_QUOTA_CANDIDATE_KEY);
+  }
+
+  private async savePendingQuotaCandidate(candidate: PendingQuotaInterruption | undefined): Promise<void> {
+    await this.context.workspaceState.update(PENDING_QUOTA_CANDIDATE_KEY, candidate);
   }
 
   private resumePrompt(): string {
