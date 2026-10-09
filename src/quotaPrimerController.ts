@@ -782,7 +782,7 @@ export class QuotaPrimerController implements vscode.Disposable {
       {
         name: "codex-auto-resume-primer",
         title: "Codex Auto Resume Quota Primer",
-        version: "0.3.6",
+        version: "0.3.7",
       },
     );
   }
