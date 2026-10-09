@@ -854,8 +854,23 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   private async readRateLimits(): Promise<RateLimitSnapshot | null> {
-    const response = await this.client!.request<RateLimitsReadResponse>("account/rateLimits/read", {});
-    return response.rateLimits ?? null;
+    try {
+      const response = await this.client!.request<RateLimitsReadResponse>(
+        "account/rateLimits/read",
+        { excludeResetCreditDetails: true },
+        30_000,
+      );
+      return response.rateLimits ?? null;
+    } catch (error) {
+      const message = (error as Error).message;
+      if (!/excludeResetCreditDetails|unknown field|invalid params?/i.test(message)) throw error;
+      const response = await this.client!.request<RateLimitsReadResponse>(
+        "account/rateLimits/read",
+        {},
+        30_000,
+      );
+      return response.rateLimits ?? null;
+    }
   }
 
   private async hasActiveCodexThread(primerThreadId?: string): Promise<boolean> {
