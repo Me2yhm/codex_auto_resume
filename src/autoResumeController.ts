@@ -554,8 +554,46 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   private async readRateLimits(): Promise<RateLimitSnapshot | null> {
-    const response = await this.client!.request<RateLimitsReadResponse>("account/rateLimits/read", {});
+    let response: RateLimitsReadResponse;
+    try {
+      response = await this.client!.request<RateLimitsReadResponse>(
+        "account/rateLimits/read",
+        { excludeResetCreditDetails: true },
+        30_000,
+      );
+    } catch (error) {
+      const message = (error as Error).message;
+      if (!/excludeResetCreditDetails|unknown field|invalid params?/i.test(message)) throw error;
+      response = await this.client!.request<RateLimitsReadResponse>(
+        "account/rateLimits/read",
+        {},
+        30_000,
+      );
+    }
+
+    this.ordinaryUsageAllowed = response.ordinaryUsageAllowed;
     return response.rateLimits ?? null;
+  }
+
+  private async tryReadRateLimits(): Promise<RateLimitReadResult> {
+    try {
+      const limits = await this.readRateLimits();
+      if (this.lastRateLimitReadDiagnostic) {
+        this.output.appendLine("[auto-resume] account quota read recovered");
+        this.lastRateLimitReadDiagnostic = undefined;
+      }
+      return { ok: true, limits };
+    } catch (error) {
+      this.ordinaryUsageAllowed = undefined;
+      const message = (error as Error).message;
+      if (this.lastRateLimitReadDiagnostic !== message) {
+        this.lastRateLimitReadDiagnostic = message;
+        this.output.appendLine(
+          `[auto-resume] account quota read unavailable: ${message}; continuing with thread-only observation`,
+        );
+      }
+      return { ok: false, limits: null };
+    }
   }
 
   private async latestTurn(threadId: string): Promise<CodexTurn | undefined> {
@@ -606,7 +644,8 @@ export class AutoResumeController implements vscode.Disposable {
 
   private async findInterruptedThread(
     limits: RateLimitSnapshot | null,
-  ): Promise<{ thread: CodexThread; reason: ArmedResume["reason"] } | undefined> {
+    rateLimitsAvailable: boolean,
+  ): Promise<{ thread: CodexThread; turn: CodexTurn; reason: ArmedResume["reason"] } | undefined> {
     const thread = await this.findMostRecentThread();
     if (!thread) return undefined;
 
@@ -624,16 +663,37 @@ export class AutoResumeController implements vscode.Disposable {
 
     const latest = await this.latestTurn(thread.id);
     this.logObservation(thread, latest, limits);
+    if (!latest) return undefined;
 
     const explicitReason = classifyLimitError(latest);
-    if (explicitReason) return { thread, reason: explicitReason };
+    if (explicitReason) {
+      return { thread, turn: latest, reason: explicitReason };
+    }
 
-    const interruptedWithoutStructuredError = latest?.status === "interrupted" || latest?.status === "failed";
-    if (interruptedWithoutStructuredError && this.quotaLooksBlocked(limits)) {
+    const interruptedWithoutStructuredError =
+      latest.status === "interrupted" || latest.status === "failed";
+    if (!interruptedWithoutStructuredError) return undefined;
+
+    if (rateLimitsAvailable && this.quotaLooksBlocked(limits)) {
       this.output.appendLine(
-        `[auto-resume] latest turn is ${latest?.status} without a structured usage-limit error, but account rate limits are blocked; treating it as a rate-limit interruption`,
+        `[auto-resume] latest turn is ${latest.status} without a structured usage-limit error, but account rate limits are blocked; treating it as a rate-limit interruption`,
       );
-      return { thread, reason: "rateLimitReached" };
+      return { thread, turn: latest, reason: "rateLimitReached" };
+    }
+
+    if (!rateLimitsAvailable) {
+      const existing = this.pendingQuotaCandidate();
+      if (existing?.threadId !== thread.id || existing.turnId !== latest.id) {
+        await this.savePendingQuotaCandidate({
+          threadId: thread.id,
+          cwd: thread.cwd,
+          turnId: latest.id,
+          observedAtMs: Date.now(),
+        });
+        this.output.appendLine(
+          `[auto-resume] latest turn ${latest.id} is ${latest.status}, but account quota state is unavailable; saved it as a pending quota candidate instead of risking a manual-stop false positive`,
+        );
+      }
     }
 
     return undefined;
