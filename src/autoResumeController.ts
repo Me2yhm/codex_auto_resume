@@ -7,6 +7,7 @@ import { addTextToOfficialCodexThread, tryNativeChatSubmit } from "./officialCod
 import {
   ArmedResume,
   CodexThread,
+  PendingQuotaInterruption,
   CodexTurn,
   RateLimitSnapshot,
   RateLimitsReadResponse,
@@ -15,7 +16,13 @@ import {
 } from "./types";
 
 const STATE_KEY = "codexAutoResume.armed";
+const PENDING_QUOTA_CANDIDATE_KEY = "codexAutoResume.pendingQuotaCandidate";
 const RESUME_OBSERVATION_POLL_MS = 1_000;
+
+interface RateLimitReadResult {
+  ok: boolean;
+  limits: RateLimitSnapshot | null;
+}
 
 export class AutoResumeController implements vscode.Disposable {
   private client?: CodexRpcClient;
@@ -24,6 +31,8 @@ export class AutoResumeController implements vscode.Disposable {
   private lastObservation?: string;
   private lastResumeObservation?: string;
   private lastThreadSelectionDiagnostic?: string;
+  private lastRateLimitReadDiagnostic?: string;
+  private ordinaryUsageAllowed?: boolean | null;
   private statusBar: vscode.StatusBarItem;
 
   constructor(
