@@ -279,7 +279,8 @@ export class AutoResumeController implements vscode.Disposable {
             limits,
             rateRead.ok,
           );
-          if (resolution !== "cleared") return;
+          if (resolution === "armed") return;
+          if (resolution === "pending" && pending.reason) return;
         }
 
         const interrupted = await this.findInterruptedThread(limits, rateRead.ok);
