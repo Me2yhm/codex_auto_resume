@@ -95,4 +95,5 @@ export interface PendingQuotaInterruption {
   cwd: string;
   turnId: string;
   observedAtMs: number;
+  reason?: ArmedResume["reason"];
 }
