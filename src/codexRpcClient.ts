@@ -17,7 +17,7 @@ export interface CodexRpcClientInfo {
 const DEFAULT_CLIENT_INFO: CodexRpcClientInfo = {
   name: "codex-auto-resume",
   title: "Codex Auto Resume",
-  version: "0.3.0",
+  version: "0.3.7",
 };
 
 export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
