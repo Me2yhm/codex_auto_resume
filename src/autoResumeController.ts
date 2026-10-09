@@ -238,7 +238,12 @@ export class AutoResumeController implements vscode.Disposable {
     this.running = true;
     try {
       await this.ensureClient();
-      const limits = await this.readRateLimits();
+
+      // Account usage reads can be slower or temporarily unavailable on Remote
+      // SSH hosts. Treat them as best-effort so local thread-store inspection
+      // can continue even when the backend usage endpoint times out.
+      const rateRead = await this.tryReadRateLimits();
+      const limits = rateRead.limits;
       const armed = this.armed();
 
       if (armed?.resumeTurnId) {
@@ -246,7 +251,11 @@ export class AutoResumeController implements vscode.Disposable {
       } else if (armed) {
         const eligibleAtMs = this.resumeEligibleAtMs(armed);
         if (Date.now() >= eligibleAtMs) {
-          if (this.quotaLooksAvailable(limits)) {
+          if (!rateRead.ok) {
+            this.output.appendLine(
+              `[auto-resume] thread ${armed.threadId} is armed, but account quota state is temporarily unavailable; keeping it armed and retrying without sending a continuation`,
+            );
+          } else if (this.quotaLooksAvailable(limits)) {
             await this.tryAutomaticResume(armed);
           } else {
             const nextReset = this.computeResetAt(limits);
@@ -263,24 +272,36 @@ export class AutoResumeController implements vscode.Disposable {
           }
         }
       } else {
-        const interrupted = await this.findInterruptedThread(limits);
+        const pending = this.pendingQuotaCandidate();
+        if (pending) {
+          const resolution = await this.resolvePendingQuotaCandidate(
+            pending,
+            limits,
+            rateRead.ok,
+          );
+          if (resolution !== "cleared") return;
+        }
+
+        const interrupted = await this.findInterruptedThread(limits, rateRead.ok);
         if (interrupted) {
           const resetAtMs = this.computeResetAt(limits);
           if (resetAtMs) {
-            const record: ArmedResume = {
-              threadId: interrupted.thread.id,
-              cwd: interrupted.thread.cwd,
-              armedAtMs: Date.now(),
+            await this.armInterruptedThread(
+              interrupted.thread,
+              interrupted.turn,
+              interrupted.reason,
               resetAtMs,
-              reason: interrupted.reason,
-            };
-            await this.context.workspaceState.update(STATE_KEY, record);
-            this.output.appendLine(
-              `[auto-resume] armed thread ${record.threadId}; reason=${record.reason}; backend reset ${new Date(resetAtMs).toISOString()}; earliest attempt ${new Date(this.resumeEligibleAtMs(record)).toISOString()}`,
             );
           } else {
+            await this.savePendingQuotaCandidate({
+              threadId: interrupted.thread.id,
+              cwd: interrupted.thread.cwd,
+              turnId: interrupted.turn.id,
+              observedAtMs: Date.now(),
+              reason: interrupted.reason,
+            });
             this.output.appendLine(
-              `[auto-resume] detected a quota interruption for ${interrupted.thread.id}, but no future reset timestamp is available yet; will retry`,
+              `[auto-resume] detected quota interruption for ${interrupted.thread.id}, but no future reset timestamp is available yet; saved the exact turn and will retry account quota reads`,
             );
           }
         }
@@ -294,6 +315,108 @@ export class AutoResumeController implements vscode.Disposable {
       this.renderStatus();
       this.scheduleNextTick();
     }
+  }
+
+  private async resolvePendingQuotaCandidate(
+    candidate: PendingQuotaInterruption,
+    limits: RateLimitSnapshot | null,
+    rateLimitsAvailable: boolean,
+  ): Promise<"pending" | "armed" | "cleared"> {
+    const turn = await this.turnById(candidate.threadId, candidate.turnId);
+    if (!turn) {
+      this.output.appendLine(
+        `[auto-resume] pending quota candidate turn ${candidate.turnId} is no longer readable; clearing it`,
+      );
+      await this.savePendingQuotaCandidate(undefined);
+      return "cleared";
+    }
+
+    const explicitReason = candidate.reason ?? classifyLimitError(turn);
+    const interrupted = turn.status === "interrupted" || turn.status === "failed";
+    if (!explicitReason && !interrupted) {
+      await this.savePendingQuotaCandidate(undefined);
+      return "cleared";
+    }
+
+    if (!rateLimitsAvailable) {
+      this.output.appendLine(
+        `[auto-resume] pending interrupted turn ${candidate.turnId} is preserved while account quota state remains unavailable`,
+      );
+      return "pending";
+    }
+
+    let reason = explicitReason;
+    if (!reason) {
+      if (!this.quotaLooksBlocked(limits)) {
+        this.output.appendLine(
+          `[auto-resume] pending interrupted turn ${candidate.turnId} was not confirmed as quota-related once account state recovered; clearing it without resuming`,
+        );
+        await this.savePendingQuotaCandidate(undefined);
+        return "cleared";
+      }
+      reason = "rateLimitReached";
+    }
+
+    const resetAtMs = this.computeResetAt(limits);
+    if (resetAtMs) {
+      const thread: CodexThread = {
+        id: candidate.threadId,
+        cwd: candidate.cwd,
+        preview: "",
+        updatedAt: Math.floor(candidate.observedAtMs / 1000),
+        recencyAt: null,
+        source: null,
+        status: { type: "inactive" },
+      };
+      await this.armInterruptedThread(thread, turn, reason, resetAtMs);
+      return "armed";
+    }
+
+    if (explicitReason && this.quotaLooksAvailable(limits)) {
+      // The account endpoint may have been unreachable for long enough that
+      // quota recovered before we could obtain its original reset timestamp.
+      // A structured quota error proves the original interruption cause, so it
+      // is safe to resume now.
+      const record: ArmedResume = {
+        threadId: candidate.threadId,
+        cwd: candidate.cwd,
+        armedAtMs: candidate.observedAtMs,
+        resetAtMs: Date.now() - this.resetGraceMs(),
+        reason,
+      };
+      await this.context.workspaceState.update(STATE_KEY, record);
+      await this.savePendingQuotaCandidate(undefined);
+      this.output.appendLine(
+        `[auto-resume] account quota is already available for previously quota-failed thread ${candidate.threadId}; promoting the saved candidate for immediate resume`,
+      );
+      await this.tryAutomaticResume(record);
+      return "armed";
+    }
+
+    this.output.appendLine(
+      `[auto-resume] quota interruption for ${candidate.threadId} is confirmed, but the backend still does not expose a usable future reset timestamp; keeping the exact turn pending`,
+    );
+    return "pending";
+  }
+
+  private async armInterruptedThread(
+    thread: CodexThread,
+    turn: CodexTurn,
+    reason: ArmedResume["reason"],
+    resetAtMs: number,
+  ): Promise<void> {
+    const record: ArmedResume = {
+      threadId: thread.id,
+      cwd: thread.cwd,
+      armedAtMs: Date.now(),
+      resetAtMs,
+      reason,
+    };
+    await this.context.workspaceState.update(STATE_KEY, record);
+    await this.savePendingQuotaCandidate(undefined);
+    this.output.appendLine(
+      `[auto-resume] armed thread ${record.threadId} from turn ${turn.id}; reason=${record.reason}; backend reset ${new Date(resetAtMs).toISOString()}; earliest attempt ${new Date(this.resumeEligibleAtMs(record)).toISOString()}`,
+    );
   }
 
   private async tryAutomaticResume(armed: ArmedResume): Promise<void> {
