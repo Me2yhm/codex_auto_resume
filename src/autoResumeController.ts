@@ -1,3 +1,4 @@
+import * as path from "path";
 import * as vscode from "vscode";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
@@ -732,7 +733,14 @@ export class AutoResumeController implements vscode.Disposable {
     const folders = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
     if (folders.length === 0) return undefined;
 
-    const response = await this.client!.request<ThreadListResponse>("thread/list", {
+    const primerThreadId = this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY)?.threadId;
+    const recentMinutes = Math.max(
+      5,
+      vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 480),
+    );
+    const recentCutoffMs = Date.now() - recentMinutes * 60_000;
+
+    const exact = await this.client!.request<ThreadListResponse>("thread/list", {
       limit: 20,
       sortKey: "updated_at",
       sortDirection: "desc",
@@ -740,20 +748,65 @@ export class AutoResumeController implements vscode.Disposable {
       cwd: folders,
       archived: false,
     });
-    const primerThreadId = this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY)?.threadId;
-    const selected = response.data.find((thread) => thread.id !== primerThreadId);
-    if (!selected && response.data.length > 0 && primerThreadId) {
+    const exactSelected = exact.data.find((thread) => thread.id !== primerThreadId);
+    if (exactSelected && exactSelected.updatedAt * 1000 >= recentCutoffMs) {
+      this.lastThreadSelectionDiagnostic = undefined;
+      return exactSelected;
+    }
+
+    // Remote SSH threads can use a cwd below the VS Code workspace root.
+    // thread/list cwd filtering is exact-only, so fall back to recent VS Code
+    // threads and apply a path-containment check locally.
+    const broad = await this.client!.request<ThreadListResponse>("thread/list", {
+      limit: 100,
+      sortKey: "updated_at",
+      sortDirection: "desc",
+      sourceKinds: ["vscode"],
+      archived: false,
+    });
+    const workspaceSelected = broad.data.find(
+      (thread) =>
+        thread.id !== primerThreadId &&
+        thread.updatedAt * 1000 >= recentCutoffMs &&
+        isThreadCwdInsideWorkspace(thread.cwd, folders),
+    );
+
+    if (workspaceSelected) {
+      const diagnosticKey = `workspace-fallback:${workspaceSelected.id}:${workspaceSelected.cwd}`;
+      if (this.lastThreadSelectionDiagnostic !== diagnosticKey) {
+        this.lastThreadSelectionDiagnostic = diagnosticKey;
+        this.output.appendLine(
+          `[auto-resume] exact workspace cwd lookup was stale or empty; selected recent workspace-descendant thread ${workspaceSelected.id}; cwd=${workspaceSelected.cwd}; source=${formatThreadSource(workspaceSelected.source)}`,
+        );
+      }
+      return workspaceSelected;
+    }
+
+    if (!exactSelected && exact.data.length > 0 && primerThreadId) {
       const diagnosticKey = `primer-only:${primerThreadId}:${folders.join("|")}`;
       if (this.lastThreadSelectionDiagnostic !== diagnosticKey) {
         this.lastThreadSelectionDiagnostic = diagnosticKey;
         this.output.appendLine(
-          `[auto-resume] ignored dedicated quota-primer thread ${primerThreadId}; no other workspace Codex thread is available`,
+          `[auto-resume] ignored dedicated quota-primer thread ${primerThreadId}; no recent workspace Codex thread is available`,
         );
       }
-    } else {
-      this.lastThreadSelectionDiagnostic = undefined;
+      return undefined;
     }
-    return selected;
+
+    if (exactSelected) {
+      const ageMinutes = (Date.now() - exactSelected.updatedAt * 1000) / 60_000;
+      const diagnosticKey = `stale:${exactSelected.id}:${Math.floor(ageMinutes)}`;
+      if (this.lastThreadSelectionDiagnostic !== diagnosticKey) {
+        this.lastThreadSelectionDiagnostic = diagnosticKey;
+        this.output.appendLine(
+          `[auto-resume] exact-cwd thread ${exactSelected.id} is ${ageMinutes.toFixed(1)} minutes old and no recent VS Code thread with cwd inside the current workspace was found`,
+        );
+      }
+      return exactSelected;
+    }
+
+    this.lastThreadSelectionDiagnostic = undefined;
+    return undefined;
   }
 
   private computeResetAt(limits: RateLimitSnapshot | null): number | undefined {
@@ -834,6 +887,29 @@ export class AutoResumeController implements vscode.Disposable {
     const eligible = new Date(this.resumeEligibleAtMs(armed)).toLocaleTimeString();
     this.statusBar.text = `$(clock) Codex Resume: ${eligible}`;
     this.statusBar.tooltip = `Thread ${armed.threadId} is armed; earliest automatic resume attempt is ${eligible}`;
+  }
+}
+
+function isThreadCwdInsideWorkspace(threadCwd: string, workspaceFolders: string[]): boolean {
+  const candidate = normalizeFsPath(threadCwd);
+  return workspaceFolders.some((folder) => {
+    const root = normalizeFsPath(folder);
+    if (candidate === root) return true;
+    const relative = path.relative(root, candidate);
+    return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+  });
+}
+
+function normalizeFsPath(value: string): string {
+  return path.resolve(value);
+}
+
+function formatThreadSource(source: unknown): string {
+  if (typeof source === "string") return source;
+  try {
+    return JSON.stringify(source);
+  } catch {
+    return "<unknown>";
   }
 }
 
