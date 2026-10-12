@@ -18,14 +18,14 @@ export interface CodexRpcClientInfo {
 const DEFAULT_CLIENT_INFO: CodexRpcClientInfo = {
   name: "codex-auto-resume",
   title: "Codex Auto Resume",
-  version: "0.3.8",
+  version: "0.3.9",
 };
 
 export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
   private child?: ChildProcessWithoutNullStreams;
   private buffer = "";
   private nextId = 1;
-  private inheritedNetworkEnvironmentKeys: string[] = [];
+  private networkEnvironmentKeys: string[] = [];
   private pending = new Map<number, PendingRequest>();
 
   constructor(
@@ -40,18 +40,24 @@ export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
     return Boolean(this.child && !this.child.killed);
   }
 
-  get hasInheritedOfficialNetworkEnvironment(): boolean {
-    return this.inheritedNetworkEnvironmentKeys.length > 0;
+  get hasNetworkEnvironmentBridge(): boolean {
+    return this.networkEnvironmentKeys.length > 0;
   }
 
   async start(): Promise<void> {
     if (this.isRunning) return;
 
+    const vscodeHttpProxy = vscode.workspace
+      .getConfiguration("http")
+      .get<string>("proxy", "")
+      .trim();
+
     const spawnEnvironment = await resolveCodexSpawnEnvironment(
       this.codexCommand,
       this.output,
+      vscodeHttpProxy,
     );
-    this.inheritedNetworkEnvironmentKeys = [...spawnEnvironment.inheritedKeys];
+    this.networkEnvironmentKeys = [...spawnEnvironment.networkKeys];
 
     this.child = spawn(this.codexCommand, ["app-server", "--stdio"], {
       windowsHide: true,
