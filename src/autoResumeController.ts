@@ -598,7 +598,7 @@ export class AutoResumeController implements vscode.Disposable {
       if (
         process.platform === "linux" &&
         this.client &&
-        !this.client.hasInheritedOfficialNetworkEnvironment
+        !this.client.hasNetworkEnvironmentBridge
       ) {
         this.recycleClientAfterTick = true;
       }
