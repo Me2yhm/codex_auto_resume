@@ -1,6 +1,7 @@
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { EventEmitter } from "events";
 import * as vscode from "vscode";
+import { resolveCodexSpawnEnvironment } from "./codexSpawnEnvironment";
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -17,7 +18,7 @@ export interface CodexRpcClientInfo {
 const DEFAULT_CLIENT_INFO: CodexRpcClientInfo = {
   name: "codex-auto-resume",
   title: "Codex Auto Resume",
-  version: "0.3.7",
+  version: "0.3.8",
 };
 
 export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
@@ -41,9 +42,15 @@ export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
   async start(): Promise<void> {
     if (this.isRunning) return;
 
+    const spawnEnvironment = await resolveCodexSpawnEnvironment(
+      this.codexCommand,
+      this.output,
+    );
+
     this.child = spawn(this.codexCommand, ["app-server", "--stdio"], {
       windowsHide: true,
       shell: false,
+      env: spawnEnvironment.environment,
     });
 
     this.child.stdout.on("data", (chunk: Buffer) => this.handleStdout(chunk.toString("utf8")));
