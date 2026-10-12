@@ -245,6 +245,8 @@ For Remote SSH projects, install the same VSIX on the remote host beside the rem
 
 Auto Resume is workspace-oriented and can be enabled independently in local and remote workspaces.
 
+On Linux Remote SSH, the official Codex VS Code extension may inject HTTP proxy variables only into its own app-server process. Version 0.3.8 detects a same-user sibling Codex app-server using the same executable, prefers one owned by the same extension host, and copies only a strict network allowlist (proxy and CA variables) into the monitoring app-server. Proxy values are never logged, and authentication/token variables are never copied.
+
 Quota Primer should have a **single owner** for a Codex account. If the same account is used in both local and Remote SSH environments, enable Primer on only one extension host.
 
 ## Safety behavior
