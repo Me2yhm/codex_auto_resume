@@ -32,6 +32,7 @@ export class AutoResumeController implements vscode.Disposable {
   private lastObservation?: string;
   private lastResumeObservation?: string;
   private lastThreadSelectionDiagnostic?: string;
+  private lastStaleThreadDiagnostic?: string;
   private lastRateLimitReadDiagnostic?: string;
   private ordinaryUsageAllowed?: boolean | null;
   private statusBar: vscode.StatusBarItem;
@@ -657,11 +658,16 @@ export class AutoResumeController implements vscode.Disposable {
       vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 480),
     );
     if (ageMinutes > recentMinutes) {
-      this.output.appendLine(
-        `[auto-resume] latest workspace thread ${thread.id} is ${ageMinutes.toFixed(1)} minutes old, outside the ${recentMinutes}-minute arming window`,
-      );
+      const diagnosticKey = `${thread.id}:${recentMinutes}`;
+      if (this.lastStaleThreadDiagnostic !== diagnosticKey) {
+        this.lastStaleThreadDiagnostic = diagnosticKey;
+        this.output.appendLine(
+          `[auto-resume] latest workspace thread ${thread.id} is ${ageMinutes.toFixed(1)} minutes old, outside the ${recentMinutes}-minute arming window`,
+        );
+      }
       return undefined;
     }
+    this.lastStaleThreadDiagnostic = undefined;
 
     const latest = await this.latestTurn(thread.id);
     this.logObservation(thread, latest, limits);
@@ -794,14 +800,6 @@ export class AutoResumeController implements vscode.Disposable {
     }
 
     if (exactSelected) {
-      const ageMinutes = (Date.now() - exactSelected.updatedAt * 1000) / 60_000;
-      const diagnosticKey = `stale:${exactSelected.id}:${Math.floor(ageMinutes)}`;
-      if (this.lastThreadSelectionDiagnostic !== diagnosticKey) {
-        this.lastThreadSelectionDiagnostic = diagnosticKey;
-        this.output.appendLine(
-          `[auto-resume] exact-cwd thread ${exactSelected.id} is ${ageMinutes.toFixed(1)} minutes old and no recent VS Code thread with cwd inside the current workspace was found`,
-        );
-      }
       return exactSelected;
     }
 
