@@ -3,6 +3,8 @@ const test = require("node:test");
 
 const {
   CODEX_NETWORK_ENV_KEYS,
+  activeProxyKeys,
+  applyVsCodeHttpProxy,
   chooseCodexNetworkEnvironmentSource,
   parseEnvironment,
 } = require("../dist/codexSpawnEnvironment.js");
@@ -44,4 +46,34 @@ test("network environment allowlist excludes authentication and originator varia
   assert.equal(CODEX_NETWORK_ENV_KEYS.includes("OPENAI_API_KEY"), false);
   assert.equal(CODEX_NETWORK_ENV_KEYS.includes("CODEX_ACCESS_TOKEN"), false);
   assert.equal(CODEX_NETWORK_ENV_KEYS.includes("CODEX_INTERNAL_ORIGINATOR_OVERRIDE"), false);
+});
+
+test("effective VS Code http.proxy populates both HTTP and HTTPS proxy casings", () => {
+  const env = {
+    HTTP_PROXY: "http://old-proxy",
+    HTTPS_PROXY: "http://old-proxy",
+  };
+
+  const keys = applyVsCodeHttpProxy(env, "  http://127.0.0.1:18001  ");
+
+  assert.deepEqual(
+    keys,
+    ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"],
+  );
+  assert.equal(env.HTTP_PROXY, "http://127.0.0.1:18001");
+  assert.equal(env.HTTPS_PROXY, "http://127.0.0.1:18001");
+  assert.equal(env.http_proxy, "http://127.0.0.1:18001");
+  assert.equal(env.https_proxy, "http://127.0.0.1:18001");
+});
+
+test("extension-host proxy detection ignores NO_PROXY by itself", () => {
+  assert.deepEqual(activeProxyKeys({ NO_PROXY: "localhost" }), []);
+  assert.deepEqual(
+    activeProxyKeys({
+      NO_PROXY: "localhost",
+      HTTP_PROXY: "http://proxy",
+      HTTPS_PROXY: "http://proxy",
+    }),
+    ["HTTP_PROXY", "HTTPS_PROXY"],
+  );
 });
