@@ -24,20 +24,57 @@ export interface CodexNetworkEnvironmentSource {
   environment: NodeJS.ProcessEnv;
 }
 
+export type CodexNetworkEnvironmentSourceKind =
+  | "vscode-http-proxy"
+  | "extension-host"
+  | "official-sibling"
+  | "direct";
+
 export interface CodexSpawnEnvironment {
   environment: NodeJS.ProcessEnv;
   sourcePid?: number;
-  inheritedKeys: string[];
+  networkKeys: string[];
+  sourceKind: CodexNetworkEnvironmentSourceKind;
 }
 
 export async function resolveCodexSpawnEnvironment(
   codexCommand: string,
   output: Pick<vscode.OutputChannel, "appendLine">,
+  vscodeHttpProxy = "",
 ): Promise<CodexSpawnEnvironment> {
   const environment: NodeJS.ProcessEnv = { ...process.env };
+  const effectiveVsCodeProxy = vscodeHttpProxy.trim();
+
+  if (effectiveVsCodeProxy) {
+    const networkKeys = applyVsCodeHttpProxy(environment, effectiveVsCodeProxy);
+    output.appendLine(
+      `[rpc] using effective VS Code http.proxy for Codex network environment: ${networkKeys.join(", ")} (value redacted)`,
+    );
+    return {
+      environment,
+      networkKeys,
+      sourceKind: "vscode-http-proxy",
+    };
+  }
+
+  const extensionHostKeys = activeProxyKeys(environment);
+  if (extensionHostKeys.length > 0) {
+    output.appendLine(
+      `[rpc] using extension-host proxy environment for Codex network access: ${extensionHostKeys.join(", ")} (values redacted)`,
+    );
+    return {
+      environment,
+      networkKeys: extensionHostKeys,
+      sourceKind: "extension-host",
+    };
+  }
 
   if (process.platform !== "linux") {
-    return { environment, inheritedKeys: [] };
+    return {
+      environment,
+      networkKeys: [],
+      sourceKind: "direct",
+    };
   }
 
   try {
@@ -45,36 +82,71 @@ export async function resolveCodexSpawnEnvironment(
     const source = chooseCodexNetworkEnvironmentSource(sources, process.pid);
     if (!source) {
       output.appendLine(
-        "[rpc] no official Codex sibling with network proxy environment was found; using the extension-host environment",
+        "[rpc] no effective VS Code http.proxy, extension-host proxy, or official Codex sibling proxy was found; using direct network access",
       );
-      return { environment, inheritedKeys: [] };
+      return {
+        environment,
+        networkKeys: [],
+        sourceKind: "direct",
+      };
     }
 
-    const inheritedKeys: string[] = [];
+    const networkKeys: string[] = [];
     for (const key of CODEX_NETWORK_ENV_KEYS) {
       const value = source.environment[key];
       if (!value) continue;
       environment[key] = value;
-      inheritedKeys.push(key);
+      networkKeys.push(key);
     }
 
-    if (inheritedKeys.length > 0) {
+    if (networkKeys.length > 0) {
       output.appendLine(
-        `[rpc] inherited official Codex network environment from sibling pid ${source.pid}: ${inheritedKeys.join(", ")} (values redacted)`,
+        `[rpc] inherited official Codex network environment from sibling pid ${source.pid}: ${networkKeys.join(", ")} (values redacted)`,
       );
     }
 
     return {
       environment,
       sourcePid: source.pid,
-      inheritedKeys,
+      networkKeys,
+      sourceKind: "official-sibling",
     };
   } catch (error) {
     output.appendLine(
-      `[rpc] could not inspect official Codex sibling network environment: ${(error as Error).message}; using the extension-host environment`,
+      `[rpc] could not inspect official Codex sibling network environment: ${(error as Error).message}; using direct network access`,
     );
-    return { environment, inheritedKeys: [] };
+    return {
+      environment,
+      networkKeys: [],
+      sourceKind: "direct",
+    };
   }
+}
+
+export function applyVsCodeHttpProxy(
+  environment: NodeJS.ProcessEnv,
+  proxy: string,
+): string[] {
+  const value = proxy.trim();
+  if (!value) return [];
+
+  // Set both conventional casings so the spawned Codex process and any
+  // libraries it invokes observe the same effective VS Code proxy.
+  const keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] as const;
+  for (const key of keys) environment[key] = value;
+  return [...keys];
+}
+
+export function activeProxyKeys(environment: NodeJS.ProcessEnv): string[] {
+  const keys = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+  ] as const;
+  return keys.filter((key) => Boolean(environment[key]));
 }
 
 export async function discoverCodexNetworkEnvironmentSources(
