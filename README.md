@@ -20,6 +20,7 @@ src/
   extension.ts              VS Code activation and commands
   autoResumeController.ts   quota/thread state machine
   codexRpcClient.ts         read-only Codex app-server client
+  codexSpawnEnvironment.ts  VS Code/proxy-aware child environment resolution
   codexUiIpc.ts             Codex UI IPC follower client
   codexLocator.ts           locates the Codex executable
   quotaPrimerController.ts  quota-window priming state machine
@@ -123,7 +124,7 @@ quota interruption
 
 Boundary testing also covers thread switching, Extension Host restart persistence, and two-stage resume verification.
 
-Remote SSH uses the same extension package but is validated separately because the Codex executable, account-network path, and IPC endpoint are provided by the remote environment. Version 0.3.7 makes account quota reads best-effort on Remote SSH: thread-store interruption observation continues across account endpoint timeouts, and ambiguous interrupted turns are persisted until quota state can confirm or reject them.
+Remote SSH uses the same extension package but is validated separately because the Codex executable, account-network path, and IPC endpoint are provided by the remote environment. Version 0.3.7 makes account quota reads best-effort on Remote SSH: thread-store interruption observation continues across account endpoint timeouts, and ambiguous interrupted turns are persisted until quota state can confirm or reject them. Version 0.3.9 additionally reads the effective VS Code `http.proxy` setting before spawning the monitoring app-server, so Remote User Settings can directly supply the same SSH-forwarded proxy path used by the official Codex extension.
 
 ## Packaging files
 
@@ -146,6 +147,15 @@ url = "https://mirrors.aliyun.com/pypi/simple"
 Do not add pip/`requirements.txt` project management alongside uv.
 
 
-## Linux Remote SSH network inheritance
+## Remote SSH network environment
 
-The official Codex VS Code extension can launch its app-server with HTTP proxy variables that are not present in the Remote shell or shared extension-host environment. Since 0.3.8, `CodexRpcClient` inspects same-user Linux `/proc` entries for a sibling app-server using the same Codex executable, preferring the same parent extension host. It copies only proxy/CA variables from a fixed allowlist into the child environment. Secret authentication variables and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` are intentionally excluded, and values are redacted from logs.
+Before spawning its monitoring app-server, `CodexRpcClient` resolves network configuration in this order:
+
+1. VS Code's effective `http.proxy` value;
+2. proxy variables already present in the extension-host process;
+3. on Linux, proxy/CA variables from a same-user official Codex sibling using the same executable;
+4. direct access.
+
+The effective VS Code value is obtained through `vscode.workspace.getConfiguration("http").get("proxy")`; the extension never hard-codes a proxy host or port. When that setting is present, the child receives the same value as `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy`.
+
+The Linux sibling fallback copies only a fixed network allowlist. Secret authentication variables and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` are intentionally excluded. Logs report only the chosen source and variable names; proxy values are redacted.
