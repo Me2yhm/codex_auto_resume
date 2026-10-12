@@ -144,3 +144,8 @@ url = "https://mirrors.aliyun.com/pypi/simple"
 ```
 
 Do not add pip/`requirements.txt` project management alongside uv.
+
+
+## Linux Remote SSH network inheritance
+
+The official Codex VS Code extension can launch its app-server with HTTP proxy variables that are not present in the Remote shell or shared extension-host environment. Since 0.3.8, `CodexRpcClient` inspects same-user Linux `/proc` entries for a sibling app-server using the same Codex executable, preferring the same parent extension host. It copies only proxy/CA variables from a fixed allowlist into the child environment. Secret authentication variables and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` are intentionally excluded, and values are redacted from logs.
