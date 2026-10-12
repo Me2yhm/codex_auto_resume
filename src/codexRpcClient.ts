@@ -25,6 +25,7 @@ export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
   private child?: ChildProcessWithoutNullStreams;
   private buffer = "";
   private nextId = 1;
+  private inheritedNetworkEnvironmentKeys: string[] = [];
   private pending = new Map<number, PendingRequest>();
 
   constructor(
@@ -39,6 +40,10 @@ export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
     return Boolean(this.child && !this.child.killed);
   }
 
+  get hasInheritedOfficialNetworkEnvironment(): boolean {
+    return this.inheritedNetworkEnvironmentKeys.length > 0;
+  }
+
   async start(): Promise<void> {
     if (this.isRunning) return;
 
@@ -46,6 +51,7 @@ export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
       this.codexCommand,
       this.output,
     );
+    this.inheritedNetworkEnvironmentKeys = [...spawnEnvironment.inheritedKeys];
 
     this.child = spawn(this.codexCommand, ["app-server", "--stdio"], {
       windowsHide: true,
