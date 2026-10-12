@@ -35,6 +35,7 @@ export class AutoResumeController implements vscode.Disposable {
   private lastStaleThreadDiagnostic?: string;
   private lastRateLimitReadDiagnostic?: string;
   private ordinaryUsageAllowed?: boolean | null;
+  private recycleClientAfterTick = false;
   private statusBar: vscode.StatusBarItem;
 
   constructor(
@@ -314,6 +315,11 @@ export class AutoResumeController implements vscode.Disposable {
       this.client?.dispose();
       this.client = undefined;
     } finally {
+      if (this.recycleClientAfterTick) {
+        this.recycleClientAfterTick = false;
+        this.client?.dispose();
+        this.client = undefined;
+      }
       this.running = false;
       this.renderStatus();
       this.scheduleNextTick();
@@ -589,11 +595,23 @@ export class AutoResumeController implements vscode.Disposable {
     } catch (error) {
       this.ordinaryUsageAllowed = undefined;
       const message = (error as Error).message;
+      if (
+        process.platform === "linux" &&
+        this.client &&
+        !this.client.hasInheritedOfficialNetworkEnvironment
+      ) {
+        this.recycleClientAfterTick = true;
+      }
       if (this.lastRateLimitReadDiagnostic !== message) {
         this.lastRateLimitReadDiagnostic = message;
         this.output.appendLine(
           `[auto-resume] account quota read unavailable: ${message}; continuing with thread-only observation`,
         );
+        if (this.recycleClientAfterTick) {
+          this.output.appendLine(
+            "[auto-resume] monitoring app-server has no inherited official Codex network environment; it will be recycled after this tick so the next poll can rediscover a sibling proxy",
+          );
+        }
       }
       return { ok: false, limits: null };
     }
