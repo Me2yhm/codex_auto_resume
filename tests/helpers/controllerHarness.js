@@ -148,6 +148,16 @@ function createControllerHarness(options = {}) {
     options.modulePath ?? path.resolve(__dirname, "../../dist/autoResumeController.js"),
     {
       vscode,
+      ...(options.realCoordination ? {} : {
+        "./recoveryCoordination": {
+          readRecoveryPriority: async () => ({ status: "clear", records: [] }),
+          RecoveryCoordinator: class {
+            async set() {}
+            async clear() {}
+            dispose() {}
+          },
+        },
+      }),
       "./codexRpcClient": { CodexRpcClient: FakeRpcClient },
       "./codexLocator": { resolveCodexExecutable: () => "/mock/codex" },
       "./officialCodexUi": {
