@@ -1,5 +1,6 @@
 import * as os from "os";
 import * as vscode from "vscode";
+import { classifyQuotaAvailability } from "./quotaAvailability";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
 import { tryAcquireQuotaPrimerSendLock } from "./quotaPrimerLock";
@@ -82,6 +83,8 @@ export class QuotaPrimerController implements vscode.Disposable {
   private timer?: NodeJS.Timeout;
   private running = false;
   private lastObservation?: string;
+  private quotaResponse?: RateLimitsReadResponse;
+  private waitingReason?: string;
   private statusBar: vscode.StatusBarItem;
 
   constructor(
@@ -146,10 +149,16 @@ export class QuotaPrimerController implements vscode.Disposable {
 
   async primeNow(): Promise<void> {
     await this.ensureClient();
-    const limits = await this.readRateLimits();
-    if (this.quotaLooksBlocked(limits)) {
+    let limits: RateLimitSnapshot | null;
+    try {
+      limits = await this.readRateLimits();
+    } catch {
+      void vscode.window.showWarningMessage("Codex Quota Primer cannot prime now: account quota is unavailable or unknown.");
+      return;
+    }
+    if (!this.quotaLooksAvailable(limits)) {
       void vscode.window.showWarningMessage(
-        "Codex Quota Primer cannot prime now because the account is currently quota-blocked.",
+        "Codex Quota Primer cannot prime now because account quota is blocked, unknown, or contradictory.",
       );
       return;
     }
@@ -244,7 +253,7 @@ export class QuotaPrimerController implements vscode.Disposable {
         return;
       }
 
-      if (this.quotaLooksBlocked(limits)) {
+      if (!this.quotaLooksAvailable(limits)) {
         this.output.appendLine(
           `[quota-primer] quota-window candidate detected (${formatDueWindows(candidates)}), but another quota blocker is still active; waiting`,
         );
@@ -313,7 +322,7 @@ export class QuotaPrimerController implements vscode.Disposable {
 
         limits = await this.readRateLimits();
         state = this.reconcileTracking(sharedState, limits);
-        if (this.quotaLooksBlocked(limits) || await this.hasActiveCodexThread(state.threadId)) {
+        if (!this.quotaLooksAvailable(limits) || await this.hasActiveCodexThread(state.threadId)) {
           this.output.appendLine(
             "[quota-primer] final preflight no longer permits a primer; keeping the dormant boundary pending",
           );
@@ -854,12 +863,14 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   private async readRateLimits(): Promise<RateLimitSnapshot | null> {
+    this.quotaResponse = undefined;
     try {
       const response = await this.client!.request<RateLimitsReadResponse>(
         "account/rateLimits/read",
         { excludeResetCreditDetails: true },
         30_000,
       );
+      this.quotaResponse = response;
       return response.rateLimits ?? null;
     } catch (error) {
       const message = (error as Error).message;
@@ -869,6 +880,7 @@ export class QuotaPrimerController implements vscode.Disposable {
         {},
         30_000,
       );
+      this.quotaResponse = response;
       return response.rateLimits ?? null;
     }
   }
@@ -991,12 +1003,17 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   private quotaLooksBlocked(limits: RateLimitSnapshot | null): boolean {
-    if (!limits) return true;
-    if (limits.rateLimitReachedType) return true;
-    const windows = [limits.primary, limits.secondary].filter(
-      (window): window is RateLimitWindow => Boolean(window),
-    );
-    return windows.some((window) => window.usedPercent >= 99);
+    return classifyQuotaAvailability(this.quotaResponse && { ...this.quotaResponse, rateLimits: limits }).status === "blocked";
+  }
+
+  private quotaLooksAvailable(limits: RateLimitSnapshot | null): boolean {
+    const availability = classifyQuotaAvailability(this.quotaResponse && { ...this.quotaResponse, rateLimits: limits });
+    const waitingReason = availability.status === "available" ? undefined : availability.reason;
+    if (waitingReason && waitingReason !== this.waitingReason) {
+      this.output.appendLine(`[quota-primer] enabled; waiting for available quota (${waitingReason})`);
+    }
+    this.waitingReason = waitingReason;
+    return availability.status === "available";
   }
 
   private scheduleNextTick(): void {
@@ -1091,6 +1108,11 @@ export class QuotaPrimerController implements vscode.Disposable {
     }
 
     const state = this.state();
+    if (this.waitingReason && !state.pendingConfirmation) {
+      this.statusBar.text = "$(clock) Codex Primer: Waiting";
+      this.statusBar.tooltip = `Enabled; waiting for available quota (${this.waitingReason}); monitoring continues`;
+      return;
+    }
     if (state.pendingConfirmation) {
       this.statusBar.text = "$(sync) Codex Primer: Confirming";
       this.statusBar.tooltip = `Waiting for quota windows to advance after primer turn ${state.pendingConfirmation.turnId ?? ""}`;

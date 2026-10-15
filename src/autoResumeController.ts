@@ -1,5 +1,6 @@
 import * as path from "path";
 import * as vscode from "vscode";
+import { classifyQuotaAvailability } from "./quotaAvailability";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
 import { sendTurnThroughOfficialCodexUi } from "./officialCodexUi";
@@ -34,7 +35,7 @@ export class AutoResumeController implements vscode.Disposable {
   private lastThreadSelectionDiagnostic?: string;
   private lastStaleThreadDiagnostic?: string;
   private lastRateLimitReadDiagnostic?: string;
-  private ordinaryUsageAllowed?: boolean | null;
+  private quotaResponse?: RateLimitsReadResponse;
   private recycleClientAfterTick = false;
   private statusBar: vscode.StatusBarItem;
 
@@ -580,7 +581,7 @@ export class AutoResumeController implements vscode.Disposable {
       );
     }
 
-    this.ordinaryUsageAllowed = response.ordinaryUsageAllowed;
+    this.quotaResponse = response;
     return response.rateLimits ?? null;
   }
 
@@ -591,9 +592,9 @@ export class AutoResumeController implements vscode.Disposable {
         this.output.appendLine("[auto-resume] account quota read recovered");
         this.lastRateLimitReadDiagnostic = undefined;
       }
-      return { ok: true, limits };
+      return { ok: classifyQuotaAvailability(this.quotaResponse).status !== "unknown", limits };
     } catch (error) {
-      this.ordinaryUsageAllowed = undefined;
+      this.quotaResponse = undefined;
       const message = (error as Error).message;
       if (
         process.platform === "linux" &&
@@ -837,27 +838,11 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   private quotaLooksBlocked(limits: RateLimitSnapshot | null): boolean {
-    if (this.ordinaryUsageAllowed === false) return true;
-    if (!limits) return false;
-    if (limits.rateLimitReachedType) return true;
-    const windows = [limits.primary, limits.secondary].filter(
-      (window): window is NonNullable<typeof window> => Boolean(window),
-    );
-    return windows.some((window) => window.usedPercent >= 99);
+    return classifyQuotaAvailability(this.quotaResponse && { ...this.quotaResponse, rateLimits: limits }).status === "blocked";
   }
 
   private quotaLooksAvailable(limits: RateLimitSnapshot | null): boolean {
-    if (this.ordinaryUsageAllowed === true) return true;
-    if (this.ordinaryUsageAllowed === false || this.ordinaryUsageAllowed === null) return false;
-    if (!limits) return false;
-    if (limits.rateLimitReachedType) return false;
-
-    // Older app-server versions do not expose ordinaryUsageAllowed. Preserve
-    // compatibility there by falling back to the historical percentage check.
-    const windows = [limits.primary, limits.secondary].filter(
-      (window): window is NonNullable<typeof window> => Boolean(window),
-    );
-    return windows.length > 0 && windows.every((window) => window.usedPercent < 99);
+    return classifyQuotaAvailability(this.quotaResponse && { ...this.quotaResponse, rateLimits: limits }).status === "available";
   }
 
   private resetGraceMs(): number {
