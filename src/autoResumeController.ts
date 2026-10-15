@@ -2,6 +2,8 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { classifyQuotaAvailability } from "./quotaAvailability";
 import { RecoveryCoordinator } from "./recoveryCoordination";
+import { isPrimerThread } from "./primerIdentity";
+import { readQuotaPrimerSendJournal } from "./quotaPrimerSendJournal";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
 import { sendTurnThroughOfficialCodexUi } from "./officialCodexUi";
@@ -306,6 +308,17 @@ export class AutoResumeController implements vscode.Disposable {
       const limits = rateRead.limits;
       if (!this.canMonitor()) return;
       const armed = this.armed();
+      const pendingIdentity = this.pendingQuotaCandidate();
+      const armedIsPrimer = armed && await this.isRecordedPrimerThread(armed.threadId);
+      const pendingIsPrimer = pendingIdentity && await this.isRecordedPrimerThread(pendingIdentity.threadId);
+      if (armedIsPrimer || pendingIsPrimer) {
+        if (!this.canMonitor()) return;
+        this.availabilityCandidate = undefined;
+        if (armedIsPrimer) await this.saveArmed(undefined);
+        if (pendingIsPrimer) await this.savePendingQuotaCandidate(undefined);
+        this.output.appendLine("[auto-resume] cleared a stored Primer recovery target; dedicated Primer threads are excluded from work recovery");
+        return;
+      }
 
       if (armed?.resumeTurnId) {
         this.availabilityCandidate = undefined;
@@ -882,76 +895,65 @@ export class AutoResumeController implements vscode.Disposable {
     );
   }
 
+  private async isRecordedPrimerThread(threadId: string): Promise<boolean> {
+    const state = this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY);
+    const host = await readQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath);
+    const journal = host.status === "ready" ? host.journal : undefined;
+    return isPrimerThread({ id: threadId } as CodexThread, state, [
+      ...(journal?.knownPrimerThreadIds ?? []), ...(journal?.threadId ? [journal.threadId] : []),
+      ...(journal?.pending ? [journal.pending.threadId] : []),
+    ]);
+  }
+
   private async findMostRecentThread(): Promise<CodexThread | undefined> {
-    const folders = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
-    if (folders.length === 0) return undefined;
-
-    const primerThreadId = this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY)?.threadId;
-    const recentMinutes = Math.max(
-      5,
-      vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 480),
-    );
+    const folders = vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) ?? [];
+    if (!folders.length) return undefined;
+    const primerState = this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY);
+    const hostState = await readQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath);
+    // Coordination failures cannot stop work observation. Durable IDs from the
+    // local state and trusted origin metadata remain usable in that case.
+    const journal = hostState.status === "ready" ? hostState.journal : undefined;
+    const hostIds = [...(journal?.knownPrimerThreadIds ?? []), ...(journal?.threadId ? [journal.threadId] : []),
+      ...(journal?.pending ? [journal.pending.threadId] : [])];
+    const recentMinutes = Math.max(5, vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 480));
     const recentCutoffMs = Date.now() - recentMinutes * 60_000;
-
-    const exact = await this.client!.request<ThreadListResponse>("thread/list", {
-      limit: 20,
-      sortKey: "updated_at",
-      sortDirection: "desc",
-      sourceKinds: ["vscode"],
-      cwd: folders,
-      archived: false,
-    });
-    const exactSelected = exact.data.find((thread) => thread.id !== primerThreadId);
-    if (exactSelected && exactSelected.updatedAt * 1000 >= recentCutoffMs) {
-      this.lastThreadSelectionDiagnostic = undefined;
-      return exactSelected;
-    }
-
-    // Remote SSH threads can use a cwd below the VS Code workspace root.
-    // thread/list cwd filtering is exact-only, so fall back to recent VS Code
-    // threads and apply a path-containment check locally.
-    const broad = await this.client!.request<ThreadListResponse>("thread/list", {
-      limit: 100,
-      sortKey: "updated_at",
-      sortDirection: "desc",
-      sourceKinds: ["vscode"],
-      archived: false,
-    });
-    const workspaceSelected = broad.data.find(
-      (thread) =>
-        thread.id !== primerThreadId &&
-        thread.updatedAt * 1000 >= recentCutoffMs &&
-        isThreadCwdInsideWorkspace(thread.cwd, folders),
-    );
-
-    if (workspaceSelected) {
-      const diagnosticKey = `workspace-fallback:${workspaceSelected.id}:${workspaceSelected.cwd}`;
-      if (this.lastThreadSelectionDiagnostic !== diagnosticKey) {
-        this.lastThreadSelectionDiagnostic = diagnosticKey;
-        this.output.appendLine(
-          `[auto-resume] exact workspace cwd lookup was stale or empty; selected recent workspace-descendant thread ${workspaceSelected.id}; cwd=${workspaceSelected.cwd}; source=${formatThreadSource(workspaceSelected.source)}`,
-        );
+    let staleExact: CodexThread | undefined;
+    for (const exact of [true, false]) {
+      let cursor: string | null = null;
+      const seen = new Set<string>();
+      // Bound work even if an old server returns a nonterminating cursor chain.
+      for (let page = 0; page < 20; page += 1) {
+        const response: ThreadListResponse = await this.client!.request<ThreadListResponse>("thread/list", {
+          limit: exact ? 20 : 100, sortKey: "updated_at", sortDirection: "desc",
+          sourceKinds: ["vscode"], ...(exact ? { cwd: folders } : {}), archived: false,
+          ...(cursor ? { cursor } : {}),
+        });
+        if (!Array.isArray(response?.data)) return undefined;
+        for (const thread of response.data) {
+          if (!thread || typeof thread.id !== "string" || typeof thread.cwd !== "string" ||
+              !Number.isFinite(thread.updatedAt) || isPrimerThread(thread, primerState, hostIds) ||
+              !isThreadCwdInsideWorkspace(thread.cwd, folders)) continue;
+          if (thread.updatedAt * 1000 < recentCutoffMs) {
+            if (exact && !staleExact) staleExact = thread;
+            continue;
+          }
+          if (!exact) {
+            const key = `workspace-fallback:${thread.id}:${thread.cwd}`;
+            if (key !== this.lastThreadSelectionDiagnostic) {
+              this.output.appendLine(`[auto-resume] selected recent workspace-descendant thread ${thread.id} after exact lookup`);
+              this.lastThreadSelectionDiagnostic = key;
+            }
+          } else this.lastThreadSelectionDiagnostic = undefined;
+          return thread;
+        }
+        const next = response.nextCursor;
+        if (!next || seen.has(next)) break;
+        seen.add(next);
+        cursor = next;
       }
-      return workspaceSelected;
     }
-
-    if (!exactSelected && exact.data.length > 0 && primerThreadId) {
-      const diagnosticKey = `primer-only:${primerThreadId}:${folders.join("|")}`;
-      if (this.lastThreadSelectionDiagnostic !== diagnosticKey) {
-        this.lastThreadSelectionDiagnostic = diagnosticKey;
-        this.output.appendLine(
-          `[auto-resume] ignored dedicated quota-primer thread ${primerThreadId}; no recent workspace Codex thread is available`,
-        );
-      }
-      return undefined;
-    }
-
-    if (exactSelected) {
-      return exactSelected;
-    }
-
-    this.lastThreadSelectionDiagnostic = undefined;
-    return undefined;
+    // Preserve the previous stale-thread diagnostic path; it never arms stale work.
+    return staleExact;
   }
 
   private computeResetAt(limits: RateLimitSnapshot | null): number | undefined {
@@ -1018,17 +1020,19 @@ export class AutoResumeController implements vscode.Disposable {
 }
 
 function isThreadCwdInsideWorkspace(threadCwd: string, workspaceFolders: string[]): boolean {
-  const candidate = normalizeFsPath(threadCwd);
-  return workspaceFolders.some((folder) => {
-    const root = normalizeFsPath(folder);
-    if (candidate === root) return true;
-    const relative = path.relative(root, candidate);
-    return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+  if (!threadCwd) return false;
+  const windowsPath = (value: string): boolean => /^[a-z]:[\\/]/i.test(value) || /^\\\\/.test(value) || /^\/\/[^/]/.test(value);
+  return workspaceFolders.some(folder => {
+    const isWindows = windowsPath(folder);
+    if (isWindows !== windowsPath(threadCwd)) return false;
+    const paths = isWindows ? path.win32 : path.posix;
+    if (!paths.isAbsolute(threadCwd) || !paths.isAbsolute(folder)) return false;
+    const normalize = (value: string): string => isWindows ? paths.normalize(value).toLowerCase() : paths.normalize(value);
+    const root = normalize(folder);
+    const candidate = normalize(threadCwd);
+    const relative = paths.relative(root, candidate);
+    return relative === "" || (!relative.startsWith(`..${paths.sep}`) && relative !== ".." && !paths.isAbsolute(relative));
   });
-}
-
-function normalizeFsPath(value: string): string {
-  return path.resolve(value);
 }
 
 function formatThreadSource(source: unknown): string {

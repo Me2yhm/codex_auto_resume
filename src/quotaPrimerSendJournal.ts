@@ -1,7 +1,7 @@
 import * as crypto from "crypto";
 import * as fs from "fs/promises";
 import * as path from "path";
-import { QuotaPrimerPendingConfirmation } from "./quotaPrimerState";
+import { migrateQuotaPrimerState, QuotaPrimerPendingConfirmation } from "./quotaPrimerState";
 
 export const QUOTA_PRIMER_SEND_JOURNAL_FILE = "quota-primer-send.json";
 
@@ -16,6 +16,7 @@ export interface QuotaPrimerSendJournal {
   version: 1;
   updatedAtMs: number;
   threadId?: string;
+  knownPrimerThreadIds?: string[];
   pending?: QuotaPrimerJournalPending;
   handledPrimaryResetAtMs?: number;
   handledSecondaryResetAtMs?: number;
@@ -42,7 +43,16 @@ export async function readQuotaPrimerSendJournal(storagePath: string): Promise<Q
 
 /** Caller holds the same-host send lock; atomic rename protects concurrent readers. */
 export async function writeQuotaPrimerSendJournal(storagePath: string, journal: QuotaPrimerSendJournal): Promise<void> {
-  const current = { ...journal, version: 1 as const, updatedAtMs: Date.now() };
+  const existing = await readQuotaPrimerSendJournal(storagePath);
+  if (existing.status !== "ready") throw new Error("Cannot replace an unreadable primer send journal");
+  const knownPrimerThreadIds = migrateQuotaPrimerState({
+    threadId: journal.threadId,
+    knownPrimerThreadIds: [...(existing.journal.knownPrimerThreadIds ?? []),
+      ...(existing.journal.threadId ? [existing.journal.threadId] : []),
+      ...(existing.journal.pending ? [existing.journal.pending.threadId] : []),
+      ...(journal.knownPrimerThreadIds ?? []), ...(journal.pending ? [journal.pending.threadId] : [])],
+  }).knownPrimerThreadIds;
+  const current = { ...journal, knownPrimerThreadIds, version: 1 as const, updatedAtMs: Date.now() };
   if (!validJournal(current)) throw new Error("Invalid primer send journal update");
   await fs.mkdir(storagePath, { recursive: true });
   const target = path.join(storagePath, QUOTA_PRIMER_SEND_JOURNAL_FILE);
@@ -57,6 +67,8 @@ export async function writeQuotaPrimerSendJournal(storagePath: string, journal: 
 
 function validJournal(value: unknown): value is QuotaPrimerSendJournal {
   if (!record(value) || value.version !== 1 || !number(value.updatedAtMs) || !optionalString(value.threadId)) return false;
+  if (value.knownPrimerThreadIds !== undefined && (!Array.isArray(value.knownPrimerThreadIds) ||
+      !value.knownPrimerThreadIds.every(id => typeof id === "string" && id.length > 0))) return false;
   for (const key of ["handledPrimaryResetAtMs", "handledSecondaryResetAtMs", "nextPrimaryResetAtMs", "nextSecondaryResetAtMs"]) {
     if (!optionalNumber(value[key])) return false;
   }

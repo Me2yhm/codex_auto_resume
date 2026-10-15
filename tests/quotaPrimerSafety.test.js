@@ -307,3 +307,17 @@ test('host confirmation carries handled and next boundaries into a different cac
   assert.equal(other.context.globalState.get(STATE).primary.trackedResetAtMs, NOW + DURATION);
   assert.equal(other.sends.length, 0);
 });
+
+
+test('positive real usage near the end of the motion interval suppresses a seemingly moving boundary', async (t) => {
+  const clock = { now: NOW };
+  let reads = 0;
+  const h = harness(t, await storage(t), { clock, request(method) {
+    if (method === 'account/rateLimits/read' && ++reads > 1) {
+      return quota(true, 1, NOW + DURATION + 14_000);
+    }
+  } });
+  await h.tick();
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.requests.some(({ method }) => method === 'turn/start'), false);
+});

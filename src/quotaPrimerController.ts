@@ -1,6 +1,7 @@
 import * as os from "os";
 import * as vscode from "vscode";
 import { classifyQuotaAvailability } from "./quotaAvailability";
+import { PRIMER_THREAD_SOURCE } from "./primerIdentity";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
 import { tryAcquireQuotaPrimerSendLock } from "./quotaPrimerLock";
@@ -17,6 +18,7 @@ import {
 } from "./officialCodexUi";
 import {
   QUOTA_PRIMER_STATE_KEY,
+  migrateQuotaPrimerState,
   QuotaPrimerPendingConfirmation,
   QuotaPrimerState,
   QuotaPrimerWindowState,
@@ -40,7 +42,6 @@ import {
 } from "./types";
 
 const PRIMER_THREAD_NAME = "Codex Auto Resume - Quota Primer";
-const PRIMER_THREAD_SOURCE = "codex-auto-resume-primer";
 const RESET_JITTER_TOLERANCE_MS = 5_000;
 const WINDOW_PROBE_RETRY_MS = 120_000;
 const UI_PRIMER_STABILITY_MS = 15_000;
@@ -172,18 +173,38 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   async resetPrimerThread(): Promise<void> {
-    const state = this.state();
-    await this.saveState({
-      ...state,
-      threadId: undefined,
-      threadCwd: undefined,
-      model: undefined,
-      effort: undefined,
-      pendingConfirmation: undefined,
-    });
-    void vscode.window.showInformationMessage(
-      "Codex Quota Primer forgot its dedicated thread. The next primer will create a new dedicated conversation.",
-    );
+    if (this.running) {
+      void vscode.window.showWarningMessage("Quota Primer is checking or confirming a turn. Retry Reset Quota Primer Thread after this check finishes.");
+      return;
+    }
+    const lock = await tryAcquireQuotaPrimerSendLock(this.context.globalStorageUri.fsPath, this.output);
+    if (!lock) return;
+    try {
+      const state = this.state();
+      const journal = await this.readJournal();
+      if (journal.updatedAtMs === 0 && state.pendingConfirmation && !state.threadId) {
+        throw new Error("Legacy pending Primer has no thread identity");
+      }
+      const pending = journal.updatedAtMs === 0 && state.pendingConfirmation && state.threadId
+        ? { ...state.pendingConfirmation, threadId: state.threadId } : journal.pending;
+      const history = migrateQuotaPrimerState({
+        ...state,
+        knownPrimerThreadIds: [...(state.knownPrimerThreadIds ?? []), ...(journal.knownPrimerThreadIds ?? []),
+          ...(journal.threadId ? [journal.threadId] : []), ...(journal.pending ? [journal.pending.threadId] : [])],
+      }).knownPrimerThreadIds;
+      await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, {
+        ...journal, threadId: undefined, knownPrimerThreadIds: history, pending,
+      });
+      await this.saveState({
+        ...state, threadId: undefined, knownPrimerThreadIds: history, threadCwd: undefined,
+        model: undefined, effort: undefined, pendingConfirmation: pending,
+      });
+      void vscode.window.showInformationMessage(
+        "Quota Primer reset its reuse target. Historical Primer conversations remain excluded from work recovery; an unconfirmed send remains tracked.",
+      );
+    } catch {
+      void vscode.window.showWarningMessage("Quota Primer could not safely reset its shared state. Check the extension output and try again.");
+    } finally { await lock.release(); }
   }
 
   dispose(): void {
@@ -201,11 +222,15 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   private state(): QuotaPrimerState {
-    return this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY) ?? {};
+    return migrateQuotaPrimerState(this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY));
   }
 
   private async saveState(state: QuotaPrimerState): Promise<void> {
-    await this.context.globalState.update(QUOTA_PRIMER_STATE_KEY, state);
+    const previous = this.state();
+    const migrated = migrateQuotaPrimerState({ ...state,
+      knownPrimerThreadIds: [...(previous.knownPrimerThreadIds ?? []), ...(state.knownPrimerThreadIds ?? [])],
+    });
+    await this.context.globalState.update(QUOTA_PRIMER_STATE_KEY, migrated);
   }
 
   private async ensureClient(): Promise<void> {
@@ -383,7 +408,11 @@ export class QuotaPrimerController implements vscode.Disposable {
   private mergeJournal(state: QuotaPrimerState, journal: QuotaPrimerSendJournal): QuotaPrimerState {
     return {
       ...state,
-      threadId: journal.pending?.threadId ?? journal.threadId ?? state.threadId,
+      threadId: journal.updatedAtMs === 0 ? state.threadId : journal.pending?.threadId ?? journal.threadId,
+      knownPrimerThreadIds: migrateQuotaPrimerState({ ...state,
+        knownPrimerThreadIds: [...(state.knownPrimerThreadIds ?? []), ...(journal.knownPrimerThreadIds ?? []),
+          ...(journal.threadId ? [journal.threadId] : []), ...(journal.pending ? [journal.pending.threadId] : [])],
+      }).knownPrimerThreadIds,
       // Only a missing journal can import legacy local state. An existing host
       // journal supersedes stale per-window Memento confirmation caches.
       pendingConfirmation: journal.updatedAtMs === 0 ? state.pendingConfirmation : journal.pending,
@@ -402,7 +431,7 @@ export class QuotaPrimerController implements vscode.Disposable {
     for (const name of ["primary", "secondary"] as const) {
       const boundary = due[name];
       const handled = name === "primary" ? journal.handledPrimaryResetAtMs : journal.handledSecondaryResetAtMs;
-      if (!boundary || boundary === handled) continue;
+      if (!boundary || boundary === handled || !windowLooksLikeDormantCandidate(limits?.[name] ?? null, Date.now())) continue;
       const sample = current[name];
       if (classifyWindowMotion(sample?.probeObservedAtMs, sample?.probeResetAtMs,
         Date.now(), resetAtMs(limits?.[name] ?? null)).motion === "moving") result[name] = boundary;
