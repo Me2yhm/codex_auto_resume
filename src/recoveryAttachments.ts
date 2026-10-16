@@ -114,7 +114,10 @@ export async function materializePastedTxt(
   };
   // Maximum payload includes the original message, delimiters and attachment
   // bodies; never send or claim that an oversized message was fully replayed.
-  if (replayText(attached) === undefined) return status("too_large", snapshots);
+  if (replayText(attached) === undefined) {
+    const marker = "[Codex Auto Resume: verified contents of pasted TXT attachment ";
+    return status(original.includes(marker) ? "invalid_reference" : "too_large", snapshots);
+  }
   return attached;
 }
 
