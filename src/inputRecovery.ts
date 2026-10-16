@@ -55,7 +55,29 @@ export function record(value: unknown): value is Record<string, unknown> {
 }
 export function hasRecordedProgress(turn: CodexTurn): boolean {
   return turn.itemsView === "full" && Array.isArray(turn.items) &&
-    turn.items.some(item => record(item) && typeof item.type === "string" && PROGRESS.has(item.type));
+    turn.items.some(itemHasProgress);
+}
+
+/** Empty lifecycle placeholders are not evidence that user input was handled. */
+function itemHasProgress(item: unknown): boolean {
+  if (!record(item) || !PROGRESS.has(String(item.type))) return false;
+  const nonempty = (value: unknown): boolean => typeof value === "string" && value.trim().length > 0;
+  if (item.type === "agentMessage" || item.type === "plan") return nonempty(item.text);
+  if (item.type === "reasoning") {
+    return [item.summary, item.content].some(value => Array.isArray(value) && value.some(nonempty));
+  }
+  // A recorded tool operation may have side effects even without visible output.
+  return ["inProgress", "completed", "failed"].includes(String(item.status)) ||
+    nonempty(item.command) || nonempty(item.tool) || nonempty(item.path) ||
+    (Array.isArray(item.changes) && item.changes.length > 0);
+}
+
+/** Lifecycle progress is only conclusive for one unambiguous input, not steering. */
+export function hasUnambiguousInputProgress(turn: CodexTurn): boolean {
+  if (!hasRecordedProgress(turn) || !Array.isArray(turn.items)) return false;
+  const users = turn.items.filter(item => record(item) && item.type === "userMessage");
+  return users.length === 1 && turn.items[0] === users[0] && !waitingOnQuestion(turn.items) &&
+    turn.items.every(item => record(item) && (item.type === "userMessage" || PROGRESS.has(String(item.type))));
 }
 
 /** Stable ordering prevents an object-key reorder being mistaken for an edit. */
@@ -164,6 +186,7 @@ export function classifyRecoveryHistory(
   if (hasRecordedProgress(latest)) {
     return { ...plan, candidate: "continue", action: "continue", reason: "recorded_execution_after_input" };
   }
+  if (items.length !== 1) return { ...plan, reason: "incomplete_activity_evidence" };
   if (replayText(plan) === undefined) return { ...plan, reason: "unsupported_structured_input" };
   plan.candidate = "replay_input";
   plan.reason = "user_only_history_requires_review";

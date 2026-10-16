@@ -28,7 +28,7 @@ test('explicit opt-in requires two stable full snapshots before replay', () => {
 
 for (const kind of ['agentMessage', 'reasoning', 'plan', 'commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'collabAgentToolCall']) {
   test(`recorded ${kind} is positive progress evidence, so recovery continues instead of restarting`, () => {
-    const plan = classify(history(failed('work', [user(), { type: kind, id: 'progress', text: 'Work', status: 'completed' }])));
+    const plan = classify(history(failed('work', [user(), { type: kind, id: 'progress', text: 'Work', summary: ['Work'], content: [], status: 'completed' }])));
     assert.equal(plan.action, 'continue');
   });
 }
@@ -44,7 +44,7 @@ for (const kind of ['summary', 'notLoaded', null, undefined]) {
 
 test('a late answer is bound to its own turn rather than progress from the preceding task', () => {
   const h = history(failed('answer', [user('answer-message', 'Offline only; simulation needs separate approval.')]),
-    failed('old-task', [user('task'), { type: 'commandExecution', id: 'command' }]));
+    failed('old-task', [user('task'), { type: 'commandExecution', id: 'command', status: 'completed' }]));
   const plan = classify(h);
   assert.equal(plan.candidate, 'replay_input');
   assert.deepEqual(plan.inputs.map(x => x.turnId), ['answer']);
@@ -58,7 +58,7 @@ test('multiple consecutive rejected messages are preserved oldest-first, never r
 });
 
 test('same-turn steering and multiple user messages remain ambiguous', () => {
-  for (const items of [[{ type: 'commandExecution', id: 'old' }, user()], [user('old'), { type: 'reasoning', id: 'r' }, user('new')]]) {
+  for (const items of [[{ type: 'commandExecution', id: 'old' }, user()], [user('old'), { type: 'reasoning', id: 'r', summary: ['Existing work'], content: [] }, user('new')]]) {
     assert.equal(classify(history(failed('steer', items))).action, 'needs_review');
   }
 });
@@ -125,7 +125,7 @@ test('automatic replay budget is bounded but an explicit new decision can permit
 
 test('replayed input that later did real work changes from replay to continue', () => {
   const first = classify(history(failed()));
-  const executed = classify(history(failed('retry', [user('retry-input'), { type: 'fileChange', id: 'edit' }])), { previous: first, replayAttempts: 2 });
+  const executed = classify(history(failed('retry', [user('retry-input'), { type: 'fileChange', id: 'edit', status: 'completed' }])), { previous: first, replayAttempts: 2 });
   assert.equal(executed.action, 'continue');
 });
 
@@ -136,7 +136,7 @@ test('input size bound is explicit and never reports a truncated prompt as saved
 });
 
 test('diagnostics contain structure but not prompt, tool text, or credentials', () => {
-  const plan = classify(history(failed('secret', [user('m', 'password=DO_NOT_LOG'), { type: 'commandExecution', id: 'cmd', aggregatedOutput: 'DO_NOT_LOG' }])));
+  const plan = classify(history(failed('secret', [user('m', 'password=DO_NOT_LOG'), { type: 'commandExecution', id: 'cmd', status: 'completed', aggregatedOutput: 'DO_NOT_LOG' }])));
   const diagnostic = JSON.stringify(recoveryDiagnostic(plan));
   assert.equal(diagnostic.includes('DO_NOT_LOG'), false);
   assert.ok(diagnostic.includes('commandExecution'));
@@ -146,7 +146,7 @@ test('full reader is strictly read-only, paginates and stops at a prior executio
   const requests = [];
   const client = { async request(method, params) {
     requests.push({ method, params });
-    return params.cursor ? { data: [failed('old', [user('old-input'), { type: 'reasoning', id: 'r' }])], nextCursor: 'not-needed' }
+    return params.cursor ? { data: [failed('old', [user('old-input'), { type: 'reasoning', id: 'r', summary: ['Existing work'], content: [] }])], nextCursor: 'not-needed' }
       : { data: [failed('new')], nextCursor: 'older' };
   } };
   const result = await readRecoveryHistory(client, 'thread');
@@ -173,7 +173,7 @@ for (const fixture of ['exception', 'malformed', 'summary', 'duplicate', 'cycle'
 }
 
 test('later progress does not silently discard a preceding independently rejected input', () => {
-  const h = history(failed('later', [user('later-message', 'Additional requirement'), { type: 'reasoning', id: 'r' }]),
+  const h = history(failed('later', [user('later-message', 'Additional requirement'), { type: 'reasoning', id: 'r', summary: ['Existing work'], content: [] }]),
     failed('earlier', [user('earlier-message', 'Original task')]));
   const plan = classify(h);
   assert.equal(plan.action, 'needs_review');
@@ -182,8 +182,23 @@ test('later progress does not silently discard a preceding independently rejecte
 });
 
 test('known own-replay lineage prevents counting the original rejected input twice', () => {
-  const h = history(failed('retry', [user('retry-message'), { type: 'commandExecution', id: 'cmd' }]), failed('original'));
+  const h = history(failed('retry', [user('retry-message'), { type: 'commandExecution', id: 'cmd', status: 'completed' }]), failed('original'));
   const plan = classify(h, { replaySourceTurnId: 'original' });
   assert.equal(plan.action, 'continue');
   assert.equal(plan.inputs.length, 1);
 });
+
+for (const placeholder of [
+  { type: 'agentMessage', id: 'stub', text: '' },
+  { type: 'reasoning', id: 'stub', summary: [], content: [] },
+  { type: 'plan', id: 'stub', text: '' },
+  { type: 'commandExecution', id: 'stub' },
+]) {
+  test(`empty ${placeholder.type} placeholder cannot authorize replay or generic continuation`, () => {
+    const h = history(failed('stubbed', [user(), placeholder]));
+    let plan = classify(h, { policy: 'replayStableUserOnly' });
+    plan = classify(h, { previous: plan, nowMs: NOW + 60000, policy: 'replayStableUserOnly' });
+    assert.equal(plan.action, 'needs_review');
+    assert.equal(plan.reason, 'incomplete_activity_evidence');
+  });
+}
