@@ -338,7 +338,21 @@ export class QuotaPrimerController implements vscode.Disposable {
               limits = await this.readRateLimits();
               await this.requireSafety(limits, threadId, manual, lifecycle);
               if (!manual) {
-                const fresh = this.finalDormantWindows(probe.state, limits, authorizedWindows, journal);
+                // A request can start a window between the older motion probe
+                // and owner discovery yet still round to 0% usage. Re-sample
+                // across a fresh interval, not merely from the old baseline.
+                const firstObservedAtMs = Date.now();
+                const first = limits;
+                await this.waitForMotionSample(firstObservedAtMs);
+                limits = await this.readRateLimits();
+                await this.requireSafety(limits, threadId, manual, lifecycle);
+                const fresh = this.finalDormantWindows({
+                  ...probe.state,
+                  primary: { ...probe.state.primary, probeObservedAtMs: firstObservedAtMs,
+                    probeResetAtMs: resetAtMs(first?.primary ?? null) },
+                  secondary: { ...probe.state.secondary, probeObservedAtMs: firstObservedAtMs,
+                    probeResetAtMs: resetAtMs(first?.secondary ?? null) },
+                }, limits, authorizedWindows, journal);
                 if (!fresh.primary && !fresh.secondary) throw new PrimerSuppressed("quota window became active or uncertain during owner discovery");
               }
             } catch (error) {
@@ -503,8 +517,13 @@ export class QuotaPrimerController implements vscode.Disposable {
     }
     const turn = pending.turnId ? await this.turnById(pending.threadId, pending.turnId) : undefined;
     let refreshed: QuotaPrimerState = { ...state, threadId: pending.threadId, pendingConfirmation: pending };
-    if (turn && classifyPrimerQuotaError(turn)) {
-      refreshed.pendingConfirmation = undefined; // A structured failure definitively permits a later safe retry.
+    if (turn && (classifyPrimerQuotaError(turn) || turn.status === "failed" ||
+        (turn.status === "interrupted" && Boolean(turn.error)))) {
+      // The official turn has a terminal, unsuccessful outcome. Its quota
+      // window must still be probed anew before a later Primer send; only
+      // genuinely unobserved/ambiguous dispatches remain fenced indefinitely.
+      this.output.appendLine(`[quota-primer] primer turn ${turn.id} ended unsuccessfully (${turn.status}); clearing confirmed terminal attempt; a later send still requires fresh dormant-window evidence`);
+      refreshed.pendingConfirmation = undefined;
     } else if (turn?.status === "completed" && this.quotaLooksAvailable(limits)) {
       refreshed = pending.manual && !pending.primaryResetAtMs && !pending.secondaryResetAtMs
         ? { ...refreshed, pendingConfirmation: undefined }
