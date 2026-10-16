@@ -22,7 +22,7 @@ The implementation has two independent automation paths:
 - Reset Primer Thread preserves known conversation IDs and unresolved confirmations. A bounded history of 256 IDs and trusted Primer metadata keep historical Primer conversations out of work discovery; ordinary work titles containing “Primer” remain eligible.
 - Work conversations keep their original model and reasoning settings. The official UI owner route and Remote proxy resolution remain unchanged.
 
-This version is prepared for Code Review. Local VSIX installation/UI smoke and real Remote SSH proxy, reload, and recovery smoke remain outstanding; deterministic automated tests do not replace those checks. Merge and release follow review and validation. To roll back, reinstall the 0.3.9 VSIX.
+This version is prepared for Code Review. Local VSIX installation/UI smoke and real Remote SSH proxy, reload, and recovery smoke remain outstanding; deterministic automated tests do not replace those checks. Merge and release follow review and validation. To roll back, disable both features, inspect and resolve any unconfirmed continuation, then reinstall the 0.3.9 VSIX before re-enabling automation.
 
 Same-host coordination covers windows sharing extension storage on the same Local or Remote host. It does not coordinate different physical hosts or separate storage profiles. For one Codex account, enable automatic Primer in one designated Local or Remote environment only.
 
