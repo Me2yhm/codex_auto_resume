@@ -331,7 +331,7 @@ test('a confirmed non-quota terminal Primer failure releases pending for a later
   await writeQuotaPrimerSendJournal(directory, { version: 1, updatedAtMs: NOW,
     threadId: 'primer-thread', pending: { threadId: 'primer-thread', turnId: failure.id,
       sentAtMs: NOW - 30_000, primaryResetAtMs: NOW - 120_000 } });
-  const h = harness(t, directory, { request(method) {
+  const h = harness(t, directory, { quota: quota(false, 100), request(method) {
     if (method === 'thread/turns/list') return { data: [failure], nextCursor: null };
   } });
   await h.tick();
@@ -349,7 +349,7 @@ test('zero-percent fixed window after a new real request cannot pass the final m
     // Following the first dispatch safety pass, real work starts at +17s.
     // The reported percent still rounds to zero. Without a fresh motion
     // interval, the +17s shift can be misclassified as a moving window.
-    if (reads >= 6) return quota(true, 0, NOW + DURATION + 17_000);
+    if (reads >= 4) return quota(true, 0, NOW + DURATION + 17_000);
     return quota(true, 0, clock.now + DURATION);
   } });
   await h.tick();
