@@ -179,3 +179,25 @@ test("ordinary no-attachment inputs still replay byte-for-byte and need no files
   assert.equal(replayText(p), original);
   assert.equal(await verifyPastedTxtBeforeSend({ ...p, action: "replay_input" }), true);
 });
+
+
+test("replaying an already expanded TXT never appends the plan again", async t => {
+  const { home, file } = await fixture(t, "READ-ONLY SESSION PLAN");
+  const first = await materializePastedTxt(classify(message(file)), undefined, home);
+  const expanded = replayText(first);
+  const second = await materializePastedTxt(classify(expanded), undefined, home);
+  assert.equal(second.attachmentIntegrity.status, "verified");
+  assert.equal(replayText(second), expanded);
+  assert.equal((replayText(second).match(/READ-ONLY SESSION PLAN/g) || []).length, 1);
+  await fs.writeFile(file, "DIFFERENT PLAN");
+  const changed = await materializePastedTxt(classify(expanded), undefined, home);
+  assert.equal(changed.reason, "attachment_invalid_reference");
+  assert.equal(replayText(changed), undefined);
+});
+
+test("unknown metadata spelling with a Codex attachments path cannot bypass checks", async () => {
+  const bad = "Pasted attachment: /home/example/.codex/attachments/" +
+    ID + "/Pasted text.txt\nPlease run it.";
+  assert.equal(pastedTxtReferences(bad).present, true);
+  assert.equal(replayText(classify(bad)), undefined);
+});
