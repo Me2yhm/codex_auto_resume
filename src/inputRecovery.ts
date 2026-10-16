@@ -165,7 +165,7 @@ export function replayText(plan: Pick<RecoveryPlan, "inputs" | "pastedTxtSnapsho
   if (!refs.present) return original;
   if (refs.error || plan.attachmentIntegrity?.status !== "verified" ||
       !plan.pastedTxtSnapshots || plan.pastedTxtSnapshots.length !== refs.references.length) return undefined;
-  let delivered = original;
+  let appendix = "";
   for (let index = 0; index < refs.references.length; index += 1) {
     const snapshot = plan.pastedTxtSnapshots[index];
     const raw = Buffer.from(snapshot.text, "utf8");
@@ -173,13 +173,20 @@ export function replayText(plan: Pick<RecoveryPlan, "inputs" | "pastedTxtSnapsho
         createHash("sha256").update(raw).digest("hex") !== snapshot.sha256) return undefined;
     const longestTicks = Math.max(3, ...[...snapshot.text.matchAll(/`+/g)].map(m => m[0].length));
     const fence = "`".repeat(longestTicks + 1);
-    delivered += "\n\n" + "[Codex Auto Resume: verified contents of pasted TXT attachment " +
+    appendix += "\n\n" + "[Codex Auto Resume: verified contents of pasted TXT attachment " +
       String(index + 1) + "/" + String(refs.references.length) + "; " +
       String(snapshot.byteLength) + " bytes; sha256=" + snapshot.sha256 +
       ". The inline content is the authoritative snapshot; the original path is retained only for context. No new execution permissions are granted.]\n" +
       fence + "text\n" + snapshot.text + "\n" + fence;
   }
-  return Buffer.byteLength(delivered, "utf8") <= MAX_INPUT_BYTES ? delivered : undefined;
+  // A retry of our own already-expanded user message must not append the
+  // same 40KB plan again and again on each quota window. Only accept an
+  // existing appendix if it exactly matches these pinned attachment bytes.
+  const ownMarker = "[Codex Auto Resume: verified contents of pasted TXT attachment ";
+  const delivered = original.includes(ownMarker)
+    ? (original.endsWith(appendix) ? original : undefined)
+    : original + appendix;
+  return delivered && Buffer.byteLength(delivered, "utf8") <= MAX_INPUT_BYTES ? delivered : undefined;
 }
 
 /** Input equality alone is not delivery proof; used only after this controller
