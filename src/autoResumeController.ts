@@ -4,6 +4,7 @@ import { classifyQuotaAvailability } from "./quotaAvailability";
 import { RecoveryCoordinator } from "./recoveryCoordination";
 import { isPrimerThread } from "./primerIdentity";
 import { readQuotaPrimerSendJournal } from "./quotaPrimerSendJournal";
+import { claimWorkResume } from "./workRecoveryDispatch";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
 import { sendTurnThroughOfficialCodexUi } from "./officialCodexUi";
@@ -390,15 +391,14 @@ export class AutoResumeController implements vscode.Disposable {
     const turn = await this.turnById(candidate.threadId, candidate.turnId);
     if (!this.canMonitor()) return "pending";
     if (!turn) {
-      this.output.appendLine(
-        `[auto-resume] pending quota candidate turn ${candidate.turnId} is no longer readable; clearing it`,
-      );
-      await this.savePendingQuotaCandidate(undefined);
-      return "cleared";
+      return "pending"; // A stale/paginated history is not evidence that this exact target vanished.
     }
 
     const explicitReason = candidate.reason ?? classifyLimitError(turn);
     const interrupted = turn.status === "interrupted" || turn.status === "failed";
+    if (explicitReason && candidate.reason !== explicitReason) {
+      await this.savePendingQuotaCandidate({ ...candidate, reason: explicitReason });
+    }
     if (!explicitReason && !interrupted) {
       await this.savePendingQuotaCandidate(undefined);
       return "cleared";
@@ -411,16 +411,18 @@ export class AutoResumeController implements vscode.Disposable {
       return "pending";
     }
 
-    let reason = explicitReason;
+    const reason = explicitReason;
     if (!reason) {
-      if (!this.quotaLooksBlocked(limits)) {
+      if (this.quotaLooksAvailable(limits)) {
         this.output.appendLine(
           `[auto-resume] pending interrupted turn ${candidate.turnId} was not confirmed as quota-related once account state recovered; clearing it without resuming`,
         );
         await this.savePendingQuotaCandidate(undefined);
         return "cleared";
       }
-      reason = "rateLimitReached";
+      // Account blocking can coincide with a manual Stop. Keep observing this
+      // exact turn until its own structured error proves the interruption cause.
+      return "pending";
     }
 
     const resetAtMs = this.computeResetAt(limits);
@@ -529,17 +531,33 @@ export class AutoResumeController implements vscode.Disposable {
       return;
     }
     if (!this.canMonitor() || this.armed()?.armedAtMs !== armed.armedAtMs) return;
+    const claim = await claimWorkResume(this.context.globalStorageUri.fsPath, {
+      threadId: armed.threadId, beforeTurnId: before.id, sentAtMs: Date.now(),
+    });
     const pending: ArmedResume = {
       ...armed,
-      dispatchPending: { beforeTurnId: before.id, sentAtMs: Date.now() },
+      dispatchPending: { beforeTurnId: claim.record.beforeTurnId, sentAtMs: claim.record.sentAtMs },
     };
-    // Persist before transport: timeout/socket-close does not prove that the
-    // owner failed to receive the request. Only a definitive no-owner permits retry.
-    await this.saveArmed(pending);
-    if (!this.canMonitor() || !this.armed()?.dispatchPending) return;
+    // Both the host claim and workspace intent precede transport. Other
+    // windows adopt this exact attempt, even after its owner crashes.
+    try {
+      await this.saveArmed(pending);
+    } catch (error) {
+      if (claim.status === "claimed") await claim.releaseUnsent();
+      throw error;
+    }
+    if (!this.canMonitor() || !this.armed()?.dispatchPending) {
+      if (claim.status === "claimed") await claim.releaseUnsent();
+      return;
+    }
     this.renderStatus();
+    if (claim.status === "existing") {
+      this.output.appendLine(`[auto-resume] adopting the same-host pending continuation for ${armed.threadId}; no duplicate will be sent`);
+      return;
+    }
     const sent = await this.sendThroughOfficialUi(armed.threadId, this.resumePrompt(), "auto-resume");
     if (!sent) {
+      await claim.releaseUnsent();
       if (this.canMonitor() && this.armed()?.dispatchPending?.sentAtMs === pending.dispatchPending!.sentAtMs) {
         await this.saveArmed({ ...pending, dispatchPending: undefined });
       }
@@ -842,14 +860,7 @@ export class AutoResumeController implements vscode.Disposable {
       latest.status === "interrupted" || latest.status === "failed";
     if (!interruptedWithoutStructuredError) return undefined;
 
-    if (rateLimitsAvailable && this.quotaLooksBlocked(limits)) {
-      this.output.appendLine(
-        `[auto-resume] latest turn is ${latest.status} without a structured usage-limit error, but account rate limits are blocked; treating it as a rate-limit interruption`,
-      );
-      return { thread, turn: latest, reason: "rateLimitReached" };
-    }
-
-    if (!rateLimitsAvailable) {
+    if (!rateLimitsAvailable || this.quotaLooksBlocked(limits)) {
       const existing = this.pendingQuotaCandidate();
       if (existing?.threadId !== thread.id || existing.turnId !== latest.id) {
         await this.savePendingQuotaCandidate({
@@ -859,7 +870,7 @@ export class AutoResumeController implements vscode.Disposable {
           observedAtMs: Date.now(),
         });
         this.output.appendLine(
-          `[auto-resume] latest turn ${latest.id} is ${latest.status}, but account quota state is unavailable; saved it as a pending quota candidate instead of risking a manual-stop false positive`,
+          `[auto-resume] latest turn ${latest.id} is ${latest.status}, and its quota cause is unconfirmed; saved it as a pending quota candidate instead of risking a manual-stop false positive`,
         );
       }
     }

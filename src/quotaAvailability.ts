@@ -64,6 +64,9 @@ function inspectSnapshot(value: unknown): SnapshotEvidence {
     return { ...evidence, valid: false };
   }
 
+  if (value.spendControlReached !== undefined && value.spendControlReached !== null &&
+      typeof value.spendControlReached !== "boolean") return { ...evidence, valid: false };
+  evidence.blocked ||= value.spendControlReached === true;
   const reached = value.rateLimitReachedType;
   if (reached !== null) {
     if (typeof reached !== "string" || reached.trim().length === 0) {

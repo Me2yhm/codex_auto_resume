@@ -165,6 +165,49 @@ test("an expired availability observation cannot confirm a much later snapshot",
   assert.equal(h.sends.length, 1);
 });
 
+test("the actual scheduler requests a ten-second confirmation and returns to normal polling after unknown quota", async (t) => {
+  const h = setup(t);
+  const timers = [];
+  t.mock.method(global, "setTimeout", (callback, delay) => {
+    const timer = { callback, delay, cancelled: false };
+    timers.push(timer);
+    return timer;
+  });
+  t.mock.method(global, "clearTimeout", (timer) => { timer.cancelled = true; });
+  h.controller.scheduleNextTick = Object.getPrototypeOf(h.controller).scheduleNextTick;
+  const originalTick = h.controller.tick.bind(h.controller);
+  let scheduledTick;
+  h.controller.tick = () => {
+    scheduledTick = originalTick();
+    return scheduledTick;
+  };
+
+  await h.tick();
+  assert.equal(timers.at(-1).delay, 10_000);
+  assert.equal(h.sends.length, 0);
+
+  h.setQuota(quota(null));
+  h.advance(10_000);
+  timers.at(-1).callback();
+  await scheduledTick;
+  assert.equal(h.sends.length, 0);
+  assert.equal(timers.at(-1).delay, 60_000);
+
+  h.setQuota(quota());
+  h.advance(60_000);
+  timers.at(-1).callback();
+  await scheduledTick;
+  assert.equal(timers.at(-1).delay, 10_000);
+  assert.equal(h.sends.length, 0);
+
+  h.advance(10_000);
+  timers.at(-1).callback();
+  await scheduledTick;
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.sends[0].threadId, THREAD_ID);
+  assert.equal(timers.at(-1).delay, 60_000);
+});
+
 test("quota endpoint failure preserves an armed conversation until two later valid reads", async (t) => {
   const h = setup(t, { quota: new Error("Remote proxy temporarily unavailable") });
   await h.tick();

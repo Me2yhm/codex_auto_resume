@@ -154,3 +154,14 @@ test("reset timestamp movement alone supplies no availability evidence", () => {
   const rateLimits = snapshot({ primary: window(100, { resetsAt: Date.now() / 1000 + 300 * 60 }) });
   assert.equal(classifyQuotaAvailability({ rateLimits }).status, "blocked");
 });
+
+
+test("modern spend-control denial is a hard blocker and conflicts with explicit ordinary permission", () => {
+  for (const permission of [undefined, null, true]) {
+    const response = { ordinaryUsageAllowed: permission, rateLimits: {
+      primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: 1_900_000_000 },
+      secondary: null, rateLimitReachedType: null, spendControlReached: true,
+    } };
+    assert.equal(classifyQuotaAvailability(response).status, permission === true ? 'unknown' : 'blocked');
+  }
+});

@@ -257,7 +257,7 @@ export class QuotaPrimerController implements vscode.Disposable {
     try {
       await this.ensureClient();
       let limits = await this.readRateLimits();
-      let journal = await this.readJournal();
+      let journal = await this.publishKnownPrimerIdentities(this.state(), await this.readJournal());
       let state = this.mergeJournal(this.reconcileTracking(this.state(), limits), journal);
       this.logObservation(state, limits);
       await this.saveState(state);
@@ -318,7 +318,7 @@ export class QuotaPrimerController implements vscode.Disposable {
               secondaryProbeResetAtMs: authorizedWindows.secondary ? resetAtMs(limits?.secondary ?? null) : undefined,
               sentAtMs: Date.now(),
             };
-            await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, { ...journal, threadId, pending });
+            await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, { ...journal, threadId, pending, knownPrimerThreadIds: state.knownPrimerThreadIds });
             await this.saveState({ ...this.state(), threadId, pendingConfirmation: pending });
             try {
               const recovery = await readRecoveryPriority(this.context.globalStorageUri.fsPath);
@@ -403,6 +403,29 @@ export class QuotaPrimerController implements vscode.Disposable {
     const result = await readQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath);
     if (result.status !== "ready") throw new PrimerSuppressed(result.reason);
     return result.journal;
+  }
+
+  private async publishKnownPrimerIdentities(local: QuotaPrimerState, journal: QuotaPrimerSendJournal): Promise<QuotaPrimerSendJournal> {
+    const localIds = migrateQuotaPrimerState(local).knownPrimerThreadIds!;
+    const known = new Set([...(journal.knownPrimerThreadIds ?? []), journal.threadId, journal.pending?.threadId]);
+    if (localIds.every(id => known.has(id))) return journal;
+    const lock = await tryAcquireQuotaPrimerSendLock(this.context.globalStorageUri.fsPath, this.output);
+    if (!lock) return journal;
+    try {
+      const fresh = await this.readJournal();
+      if (fresh.updatedAtMs === 0 && local.pendingConfirmation && !local.threadId) {
+        throw new PrimerSuppressed("legacy primer confirmation has no readable thread identity");
+      }
+      const next: QuotaPrimerSendJournal = {
+        ...fresh,
+        threadId: fresh.updatedAtMs === 0 ? local.threadId : fresh.threadId,
+        pending: fresh.updatedAtMs === 0 && local.pendingConfirmation && local.threadId
+          ? { ...local.pendingConfirmation, threadId: local.threadId } : fresh.pending,
+        knownPrimerThreadIds: [...(fresh.knownPrimerThreadIds ?? []), ...localIds],
+      };
+      await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, next);
+      return await this.readJournal();
+    } finally { await lock.release(); }
   }
 
   private mergeJournal(state: QuotaPrimerState, journal: QuotaPrimerSendJournal): QuotaPrimerState {

@@ -17,6 +17,7 @@ export interface RateLimitSnapshot {
   primary: RateLimitWindow | null;
   secondary: RateLimitWindow | null;
   rateLimitReachedType: RateLimitReachedType | null;
+  spendControlReached?: boolean | null;
 }
 
 export interface RateLimitsReadResponse {

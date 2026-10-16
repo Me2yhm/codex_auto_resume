@@ -149,6 +149,9 @@ function createControllerHarness(options = {}) {
     {
       vscode,
       ...(options.realCoordination ? {} : {
+        "./workRecoveryDispatch": {
+          claimWorkResume: async (_path, record) => ({ status: "claimed", record: { ...record, token: "mock-dispatch" }, releaseUnsent: async () => {} }),
+        },
         "./recoveryCoordination": {
           readRecoveryPriority: async () => ({ status: "clear", records: [] }),
           RecoveryCoordinator: class {

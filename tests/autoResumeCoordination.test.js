@@ -187,9 +187,9 @@ test("an unreadable coordination storage does not lose armed work or prevent con
   const shared = await storage(t);
   // A regular file cannot hold a registry directory. This also works when
   // tests run as root, unlike a permission-bit-only unreadability fixture.
-  const brokenStorage = path.join(shared.root, "storage-is-a-file");
-  await fs.writeFile(brokenStorage, "not a directory");
-  const broken = { root: brokenStorage, harnesses: shared.harnesses };
+  const brokenStorage = shared.root;
+  await fs.writeFile(path.join(brokenStorage, "recovery-coordination"), "not a registry directory");
+  const broken = shared;
   const h = harnessInStorage(t, broken, { workspaceValues: { [ARMED_KEY]: armed() }, response: quota(true) });
   await h.tick();
   assert.equal(h.state().threadId, THREAD_ID);

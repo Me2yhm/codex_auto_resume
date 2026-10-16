@@ -175,3 +175,26 @@ test("saving a replacement Primer target keeps the previous target in local hist
   assert.ok(state.knownPrimerThreadIds.includes("old-primer"));
   assert.ok(state.knownPrimerThreadIds.includes("replacement-primer"));
 });
+
+
+test("a window publishes its legacy history to the host before another cache performs discovery", async (t) => {
+  const h = await primerController(t, { threadId: "legacy-X", knownPrimerThreadIds: ["older-X"] },
+    { threadId: "host-Y" });
+  h.setRequestHandler(method => {
+    assert.equal(method, "account/rateLimits/read");
+    return { ordinaryUsageAllowed: false, rateLimits: null };
+  });
+  await h.controller.primeNow();
+  const host = await readQuotaPrimerSendJournal(h.root);
+  assert.equal(host.journal.threadId, "host-Y");
+  for (const id of ["legacy-X", "older-X", "host-Y"]) assert.ok(host.journal.knownPrimerThreadIds.includes(id));
+  assert.equal(h.sends.length, 0);
+  const other = createControllerHarness({ globalStoragePath: h.root,
+    request(method) {
+      assert.equal(method, "thread/list");
+      return { data: [thread("legacy-X"), thread("work")], nextCursor: null };
+    } });
+  t.after(other.dispose);
+  await other.controller.ensureClient();
+  assert.equal((await other.controller.findMostRecentThread()).id, "work");
+});
