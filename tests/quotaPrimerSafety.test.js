@@ -321,3 +321,38 @@ test('positive real usage near the end of the motion interval suppresses a seemi
   assert.equal(h.sends.length, 0);
   assert.equal(h.requests.some(({ method }) => method === 'turn/start'), false);
 });
+
+
+test('a confirmed non-quota terminal Primer failure releases pending for a later fresh window probe', async (t) => {
+  const directory = await storage(t);
+  const failure = { id: 'primer-terminal-failure', status: 'failed',
+    error: { codexErrorInfo: 'internalServerError', message: 'backend failed' },
+    startedAt: NOW / 1000, completedAt: NOW / 1000 };
+  await writeQuotaPrimerSendJournal(directory, { version: 1, updatedAtMs: NOW,
+    threadId: 'primer-thread', pending: { threadId: 'primer-thread', turnId: failure.id,
+      sentAtMs: NOW - 30_000, primaryResetAtMs: NOW - 120_000 } });
+  const h = harness(t, directory, { request(method) {
+    if (method === 'thread/turns/list') return { data: [failure], nextCursor: null };
+  } });
+  await h.tick();
+  const journal = (await readQuotaPrimerSendJournal(directory)).journal;
+  assert.equal(journal.pending, undefined);
+  assert.ok(h.logs.some(line => line.includes('clearing confirmed terminal attempt')));
+});
+
+test('zero-percent fixed window after a new real request cannot pass the final motion guard', async (t) => {
+  const clock = { now: NOW };
+  let reads = 0;
+  const h = harness(t, await storage(t), { clock, request(method) {
+    if (method !== 'account/rateLimits/read') return;
+    reads += 1;
+    // Following the first dispatch safety pass, real work starts at +17s.
+    // The reported percent still rounds to zero. Without a fresh motion
+    // interval, the +17s shift can be misclassified as a moving window.
+    if (reads >= 6) return quota(true, 0, NOW + DURATION + 17_000);
+    return quota(true, 0, clock.now + DURATION);
+  } });
+  await h.tick();
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.requests.some(({ method }) => method === 'turn/start'), false);
+});
