@@ -357,3 +357,105 @@ test('disabling the input-aware setting cannot bypass an already saved review', 
   assert.equal(h.state().recoveryPlan.action, 'needs_review');
   assert.equal(h.sent.length, 0);
 });
+
+
+test('the real TXT-backed prompt is snapshotted and expanded after an explicit review', async t => {
+  const fs = require('node:fs/promises');
+  const os = require('node:os');
+  const path = require('node:path');
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-replay-ui-'));
+  const dir = path.join(home, 'attachments', '0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3');
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, 'Pasted text.txt');
+  const plan = '调研计划\n只读，严禁运行生产交易\n'.repeat(100);
+  await fs.writeFile(file, plan);
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous;
+    await fs.rm(home, { recursive: true, force: true });
+  });
+  const original = '# Files pasted by the user:\n\n## "Optimizer 调研计划": ' +
+    file + '\n\n## My request:\n先只读调研，不连接实盘。\n';
+  const failed = turn(); failed.items[0].content[0].text = original;
+  const h = setup(t, { turns: [failed], available: false });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+  assert.equal(h.state().recoveryPlan.attachmentIntegrity.status, 'verified');
+  assert.equal(h.state().recoveryPlan.pastedTxtSnapshots[0].text, plan);
+  await h.controller.inspectRecoveryInput();
+  assert.equal(h.previews[0].content.includes(plan), false);
+  assert.equal(h.previews[0].content.includes(file), false);
+  h.choose(choices => choices[0]); await h.controller.reviewRecoveryInput();
+  assert.equal(h.state().recoveryPlan.action, 'replay_input');
+  assert.equal(h.sent.length, 0);
+  h.setQuota(quota()); h.advance(); await h.tick(); h.advance(); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].threadId, THREAD);
+  assert.ok(h.sent[0].prompt.startsWith(original));
+  assert.ok(h.sent[0].prompt.includes(plan));
+  assert.ok(h.sent[0].prompt.includes('sha256='));
+  assert.equal(h.state().replayAttempts, 1);
+});
+
+test('TXT modification during official owner discovery cancels a definitely-unsent replay', async t => {
+  const fs = require('node:fs/promises');
+  const os = require('node:os');
+  const path = require('node:path');
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-replay-discovery-'));
+  const dir = path.join(home, 'attachments', '0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3');
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, 'Pasted text.txt');
+  await fs.writeFile(file, 'PINNED REQUIREMENTS');
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous;
+    await fs.rm(home, { recursive: true, force: true });
+  });
+  const original = '# Files pasted by the user:\n\n## "plan": ' +
+    file + '\n\n## My request:\nOffline only\n';
+  const failed = turn(); failed.items[0].content[0].text = original;
+  const h = setup(t, { turns: [failed], onDiscovery: async () => {
+    await fs.writeFile(file, 'CHANGED, UNAPPROVED PLAN');
+  } });
+  await h.tick();
+  h.choose(choices => choices[0]); await h.controller.reviewRecoveryInput();
+  h.advance(); await h.tick(); h.advance(); await h.tick();
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.state().dispatchPending, undefined);
+  assert.equal(h.state().replayAttempts, undefined);
+  h.advance(); await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+  assert.equal(h.state().recoveryPlan.reason, 'attachment_modified');
+});
+
+test('reloading with a pinned TXT snapshot refuses a missing original, without sending the naked path', async t => {
+  const fs = require('node:fs/promises');
+  const os = require('node:os');
+  const path = require('node:path');
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-replay-reload-'));
+  const dir = path.join(home, 'attachments', '0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3');
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, 'Pasted text.txt');
+  await fs.writeFile(file, 'PINNED PLAN');
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous;
+    await fs.rm(home, { recursive: true, force: true });
+  });
+  const failed = turn(); failed.items[0].content[0].text =
+    '# Files pasted by the user:\n\n## "plan": ' + file + '\n\n## My request:\nOffline only\n';
+  const h = setup(t, { turns: [failed], available: false });
+  await h.tick(); h.choose(choices => choices[0]); await h.controller.reviewRecoveryInput();
+  const saved = JSON.parse(JSON.stringify(h.state()));
+  h.dispose();
+  await fs.unlink(file);
+  const next = setup(t, { turns: [failed], armed: saved });
+  await next.tick();
+  assert.equal(next.state().recoveryPlan.action, 'needs_review');
+  assert.equal(next.state().recoveryPlan.reason, 'attachment_missing');
+  next.setQuota(quota()); next.advance(); await next.tick(); next.advance(); await next.tick();
+  assert.equal(next.sent.length, 0);
+});
