@@ -48,7 +48,7 @@ test("real Codex-style pasted TXT reference is captured, SHA-pinned and expanded
   assert.ok(dispatchedText.startsWith(original));
   assert.ok(dispatchedText.includes(originalContent));
   assert.ok(dispatchedText.includes(digest));
-  assert.equal(await verifyPastedTxtBeforeSend({ ...captured, action: "replay_input" }), true);
+  assert.equal(await verifyPastedTxtBeforeSend({ ...captured, action: "replay_input" }, home), true);
   const diagnostics = JSON.stringify(recoveryDiagnostic(captured));
   assert.ok(!diagnostics.includes(file));
   assert.ok(!diagnostics.includes("计划第一步"));
@@ -66,7 +66,7 @@ test("captured original is never silently replaced after the TXT file changes", 
   assert.equal(altered.reason, "attachment_modified");
   assert.equal(altered.pastedTxtSnapshots[0].text, "Offline only: ORIGINAL");
   assert.equal(replayText(altered), undefined);
-  assert.equal(await verifyPastedTxtBeforeSend({ ...pinned, action: "replay_input" }), false);
+  assert.equal(await verifyPastedTxtBeforeSend({ ...pinned, action: "replay_input" }, home), false);
 });
 
 test("missing TXT is retained as unresolved rather than replaying its path alone", async t => {
@@ -145,7 +145,7 @@ test("oversized pasted TXT cannot be silently shortened", async t => {
 
 test("pasted TXT expansion obeys total maximum IPC message budget", async t => {
   const { home, file } = await fixture(t, "Z".repeat(MAX_PASTED_TXT_BYTES));
-  const source = message(file, "X".repeat(MAX_INPUT_BYTES - MAX_PASTED_TXT_BYTES - 500));
+  const source = message(file, "X".repeat(MAX_INPUT_BYTES - MAX_PASTED_TXT_BYTES - 20));
   const p = await materializePastedTxt(classify(source), undefined, home);
   assert.equal(p.reason, "attachment_too_large");
   assert.equal(replayText(p), undefined);
