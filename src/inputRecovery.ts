@@ -127,7 +127,14 @@ export type PastedTxtReferences = { present: false; references: [] } |
 export function pastedTxtReferences(text: string): PastedTxtReferences {
   const header = /^# Files pasted by the user:\s*$/gmi;
   const headers = [...text.matchAll(header)];
-  if (headers.length === 0) return { present: false, references: [] };
+  if (headers.length === 0) {
+    // Unknown Codex attachment formatting must never be replayed as a bare
+    // path without validated bytes. Detection is only a negative safety gate;
+    // we do not open or infer arbitrary paths outside the recognized block.
+    return /[\\/]\.codex[\\/]attachments[\\/]/i.test(text)
+      ? { present: true, references: [], error: "invalid_reference" }
+      : { present: false, references: [] };
+  }
   if (headers.length !== 1) return { present: true, references: [], error: "invalid_reference" };
   const block = text.slice(headers[0].index! + headers[0][0].length).split(/\r?\n/);
   const references: string[] = [];
@@ -164,12 +171,12 @@ export function replayText(plan: Pick<RecoveryPlan, "inputs" | "pastedTxtSnapsho
     const raw = Buffer.from(snapshot.text, "utf8");
     if (snapshot.sourcePath !== refs.references[index] || raw.length !== snapshot.byteLength ||
         createHash("sha256").update(raw).digest("hex") !== snapshot.sha256) return undefined;
-    const longestTicks = Math.max(3, ...[...snapshot.text.matchAll(/\`+/g)].map(m => m[0].length));
-    const fence = "\`".repeat(longestTicks + 1);
+    const longestTicks = Math.max(3, ...[...snapshot.text.matchAll(/`+/g)].map(m => m[0].length));
+    const fence = "`".repeat(longestTicks + 1);
     delivered += "\n\n" + "[Codex Auto Resume: verified contents of pasted TXT attachment " +
       String(index + 1) + "/" + String(refs.references.length) + "; " +
       String(snapshot.byteLength) + " bytes; sha256=" + snapshot.sha256 +
-      ". This preserves the original pasted plan; it grants no new execution permissions.]\n" +
+      ". The inline content is the authoritative snapshot; the original path is retained only for context. No new execution permissions are granted.]\n" +
       fence + "text\n" + snapshot.text + "\n" + fence;
   }
   return Buffer.byteLength(delivered, "utf8") <= MAX_INPUT_BYTES ? delivered : undefined;
@@ -288,6 +295,7 @@ export function recoveryDiagnostic(plan: RecoveryPlan): Record<string, unknown> 
     reason: plan.reason, sourceTurnId: plan.sourceTurnId, fingerprint: plan.fingerprint,
     observedAtMs: plan.observedAtMs, stableSinceMs: plan.stableSinceMs, stale: Boolean(plan.stale),
     replayableText: replayText(plan) !== undefined, evidence: plan.evidence,
+    attachmentSha256: plan.pastedTxtSnapshots?.map(snapshot => snapshot.sha256) ?? [],
     attachmentIntegrity: plan.attachmentIntegrity ?? { status: pastedTxtReferences(originalReplayText(plan) ?? "").present
       ? "unverified" : "not_applicable", count: 0, bytes: 0 },
     // Attachment contents and absolute source paths are deliberately not logged.
