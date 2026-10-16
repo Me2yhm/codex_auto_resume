@@ -5,6 +5,7 @@ import {
   RecoveryPlan, replayText, UserOnlyPolicy, matchesReplayedInput,
 } from "./inputRecovery";
 import { readRecoveryHistory } from "./recoveryHistory";
+import { materializePastedTxt, verifyPastedTxtBeforeSend } from "./recoveryAttachments";
 import { classifyQuotaAvailability } from "./quotaAvailability";
 import { RecoveryCoordinator } from "./recoveryCoordination";
 import { isPrimerThread } from "./primerIdentity";
@@ -334,11 +335,11 @@ export class AutoResumeController implements vscode.Disposable {
       return undefined;
     }
     const changedSource = Boolean(latest && isQuotaFailure(latest) && latest.id !== current.interruptedTurnId);
-    const plan = classifyRecoveryHistory(history, {
+    const plan = await materializePastedTxt(classifyRecoveryHistory(history, {
       nowMs: Date.now(), previous: current.recoveryPlan, policy: this.userOnlyPolicy(),
       replayAttempts: changedSource ? 0 : current.replayAttempts,
       replaySourceTurnId: latest?.id === current.replayTurnId ? current.replaySourceTurnId : undefined,
-    });
+    }), current.recoveryPlan);
     const next: ArmedResume = {
       ...current,
       ...(changedSource && latest ? {
@@ -369,9 +370,9 @@ export class AutoResumeController implements vscode.Disposable {
       return;
     }
     const history = await readRecoveryHistory(this.client!, threadId);
-    const plan = classifyRecoveryHistory(history, { nowMs: Date.now(), previous: armed?.recoveryPlan,
+    const plan = await materializePastedTxt(classifyRecoveryHistory(history, { nowMs: Date.now(), previous: armed?.recoveryPlan,
       replaySourceTurnId: history.turns[0]?.id === armed?.replayTurnId ? armed?.replaySourceTurnId : undefined,
-    });
+    }), armed?.recoveryPlan);
     const report = { threadId, ...recoveryDiagnostic(plan),
       officialExtensionVersion: vscode.extensions?.getExtension("openai.chatgpt")?.packageJSON?.version ?? "unknown" };
     const document = await vscode.workspace.openTextDocument({ language: "json", content: JSON.stringify(report, null, 2) });
@@ -399,6 +400,9 @@ export class AutoResumeController implements vscode.Disposable {
       const document = await vscode.workspace.openTextDocument({ language: "json", content: JSON.stringify({
         note: "LOCAL INPUT PREVIEW. This untitled document contains user input. Do not upload it without reviewing it for secrets. Edits here do not change the saved input.",
         threadId: armed.threadId, action: plan.action, reason: plan.reason, inputs: plan.inputs,
+        pastedTxtAttachment: plan.attachmentIntegrity ?? null,
+        attachmentSha256: plan.pastedTxtSnapshots?.map(item => item.sha256) ?? [],
+        noteOnTxt: "Verified TXT contents are snapshotted locally and appended verbatim on replay; this preview does not duplicate their bodies.",
       }, null, 2) });
       await vscode.window.showTextDocument(document, { preview: true });
       if (plan.stale || plan.candidate !== "replay_input" || replayText(plan) === undefined) {
@@ -413,13 +417,14 @@ export class AutoResumeController implements vscode.Disposable {
       );
       if (choice !== replay && choice !== proceed) return;
       const fresh = await readRecoveryHistory(this.client!, armed.threadId);
-      const check = classifyRecoveryHistory(fresh, { nowMs: Date.now(), previous: plan,
+      const check = await materializePastedTxt(classifyRecoveryHistory(fresh, { nowMs: Date.now(), previous: plan,
         replaySourceTurnId: fresh.turns[0]?.id === prepared?.replayTurnId ? prepared?.replaySourceTurnId : undefined,
-      });
+      }), plan);
       const current = this.armed();
       if (!this.canMonitor() || !current || current.armedAtMs !== armed.armedAtMs ||
           current.threadId !== armed.threadId || current.dispatchPending || current.resumeTurnId ||
           !fresh.complete || check.fingerprint !== plan.fingerprint || check.candidate !== "replay_input" ||
+          check.stale || replayText(check) === undefined ||
           current.recoveryPlan?.fingerprint !== plan.fingerprint) {
         void vscode.window.showWarningMessage("Recovery changed while the dialog was open. The stale choice was not applied; review the latest input.");
         return;
@@ -752,13 +757,15 @@ export class AutoResumeController implements vscode.Disposable {
           latest = await this.latestTurn(armed.threadId);
           if (this.inputRecoveryEnabled()) {
             const history = await readRecoveryHistory(this.client!, armed.threadId);
-            const checked = classifyRecoveryHistory(history, {
+            const checked = await materializePastedTxt(classifyRecoveryHistory(history, {
               nowMs: Date.now(), previous: armed.recoveryPlan, policy: this.userOnlyPolicy(),
               replayAttempts: armed.replayAttempts,
               replaySourceTurnId: history.turns[0]?.id === armed.replayTurnId ? armed.replaySourceTurnId : undefined,
-            });
-            if (!history.complete || checked.fingerprint !== armed.recoveryPlan?.fingerprint ||
-                checked.action !== armed.recoveryPlan.action || checked.action === "needs_review") {
+            }), armed.recoveryPlan);
+            if (!history.complete || checked.stale || checked.fingerprint !== armed.recoveryPlan?.fingerprint ||
+                checked.action !== armed.recoveryPlan.action || checked.action === "needs_review" ||
+                (checked.action === "replay_input" && (
+                  replayText(checked) !== prompt || !await verifyPastedTxtBeforeSend(checked)))) {
               throw new Error("recovery evidence changed");
             }
           }
