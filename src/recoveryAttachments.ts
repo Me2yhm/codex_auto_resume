@@ -1,4 +1,4 @@
-import { createHash, constants as cryptoConstants } from "crypto";
+import { createHash } from "crypto";
 import { constants as fileConstants, promises as fs } from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -120,9 +120,9 @@ export async function materializePastedTxt(
 
 /** Use at the FINAL official-owner pre-startTurn guard, not only when Armed.
  * This is read-only. A replaced, deleted, or unreadable original blocks send. */
-export async function verifyPastedTxtBeforeSend(plan: RecoveryPlan): Promise<boolean> {
+export async function verifyPastedTxtBeforeSend(plan: RecoveryPlan, codexHomeOverride?: string): Promise<boolean> {
   if (plan.action !== "replay_input") return true;
-  const validated = await materializePastedTxt(plan, plan);
+  const validated = await materializePastedTxt(plan, plan, codexHomeOverride);
   return validated.attachmentIntegrity?.status !== "verified"
     ? !pastedTxtReferences(originalReplayText(plan) ?? "").present
     : replayText(validated) === replayText(plan);
