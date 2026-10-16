@@ -1,23 +1,88 @@
-# Input-aware quota recovery
+# v0.3.11 input-aware quota recovery — implementation and review guide
 
-Base: main 951d9dd40ca88fd0cf7ca457dfb36cd5a6a4c2c3 (0.3.10).
+Status: implemented on `feature/input-aware-quota-recovery`, draft PR #4. Not merged or released. Base: main `951d9dd40ca88fd0cf7ca457dfb36cd5a6a4c2c3` (0.3.10).
 
-## Scope
+## What changed
 
-Reuse the existing official work conversation and UI IPC sender. Select a recovery action for a quota-failed user input: `continue`, `replay_input`, or `needs_review`. This is not a general outbox, task queue, or new-thread creator.
+A saved recovery now selects `continue`, `replay_input`, or `needs_review` for a particular failed user input, instead of always sending the generic continuation. The existing official conversation and UI IPC route are reused. This is not a general outbox, task queue, or new-thread creator.
 
-Persist the exact source thread/turn/message identity and input version. Inspect new user input while Armed, not only at reset. Recheck the source immediately before sending. Retain quota confirmation, workspace/Primer isolation, known-unsent cancellation and ambiguous-send fences.
+| Observed evidence | Default action |
+| --- | --- |
+| Full history, one unambiguous input followed by substantive agent/plan/reasoning output or recorded tool activity | `continue`, using the existing configured prompt |
+| Full history contains only one replayable plain-text user input | `needs_review`, with a replay candidate and the exact original text retained |
+| Missing, summary-only, paginated-incomplete or unknown history; empty activity placeholders; steering; multiple unresolved inputs; unsupported structured payload | `needs_review`, no automatic send |
 
-## Evidence boundary
+A newly rejected answer while the conversation is already Armed replaces the old recovery source, rather than being lost behind the original interruption. New quota-failed input can also supersede an older interrupted-null verification. Existing active/native continuations are observed rather than submitted again. After a replay starts doing work and exhausts quota again, it is reclassified as continued work, not repeatedly restarted from the original task prompt.
 
-The deployed Codex version's `thread/turns/list` full-history payloads must be inspected. A summary view, `inProgress`, elapsed duration, account percentage, or missing visible assistant text is not proof that a prompt was unexecuted. Full user-only failed history is a replay candidate, not an unconditional proof of rejection before execution. Unsupported/missing/ambiguous history must not silently drop input or automatically replay potentially executed work.
+## The evidence boundary is intentional
 
-Ordinary selection-generated user messages can be recovered verbatim. Expired approval RPCs must never be replayed as permission grants. Structured input that cannot be reproduced losslessly must be retained for review, not flattened.
+The public protocol exposes turn items and full-history reads, but the inspected interfaces do not promise a universal `rejectedBeforeExecution` field. A new turn ID, `inProgress`, a quick failure, 100% account quota, or no visible assistant output is not sufficient proof of non-execution. Two identical full-history reads mitigate synchronization delay, but do not establish that no hidden work happened.
 
-## Implementation and release gates
+Therefore the default is **review**, not automatic replay of every user-only turn. Real full-history samples from the user's installed Local and Remote Codex versions have not yet been supplied. Public schemas and simulated fixtures are not presented as real-environment validation.
 
-- Add a pure evidence classifier and bounded read-only history reader.
-- Persist content snapshots and source fingerprints; expose review/status diagnostics without leaking prompt text into Output.
-- Integrate source refresh during Armed, final-send validation, replay/continue transition and reload safety.
-- Cover late answers, newly rejected tasks, multiple user inputs, steering, incomplete history, repeated exhaustion, manual retry, ambiguous delivery and Primer exclusion with deterministic tests.
-- Validate real Local/Remote full-history samples before declaring automatic classification release-ready. Keep main unchanged and use a draft PR until independent review.
+### Optional automatic policy
+
+`codexAutoResume.inputRecovery.userOnlyPolicy` accepts:
+
+- `review` (default): the user reviews and explicitly chooses replay or continuation for an eligible saved input.
+- `replayStableUserOnly` (opt-in): a full, stable, single plain-text user-only quota failure becomes replayable after at least two full observations separated by 10 seconds. This is a named **heuristic**, not authoritative proof of execution phase. Do not enable globally before validating the installed Codex build.
+
+Both policies retain two independent available-quota reads before dispatch. Automatic replay attempts are bounded to two for the tracked retry chain; new independent user input and positive execution progress are classified separately. A known-unsent cancellation refunds the attempt count; ambiguous delivery never creates an automatic duplicate.
+
+`codexAutoResume.inputRecovery.enabled` defaults to true for this review build. Turning it off affects recovery without an existing input plan; it cannot silently discard or bypass a plan already saved in Armed state. Normal Auto Resume Disable still explicitly clears the workspace recovery, so inspect/copy needed content before disabling or downgrading.
+
+## Commands
+
+### `Codex Auto Resume: Inspect Recovery Input`
+
+Read-only. It reads the Armed work thread, or the selected recent workspace work thread when nothing is Armed, and opens an **untitled JSON diagnostic**. It does not start, resume or write a work turn. The report contains thread/turn/message IDs, source fingerprint, items-view/type information, byte counts, classification reason and official extension version. It excludes original prompt text, tool output and credentials. Inspect IDs and metadata before sharing the report.
+
+Useful sample classes are (1) a work turn that executed and then exhausted quota, (2) a new task submitted after quota was already exhausted, and (3) a selection-generated question-plus-answer submitted after exhaustion. No artificial quota depletion is needed.
+
+### `Codex Auto Resume: Review Recovery Input`
+
+Opens a **local untitled preview containing the original input**. This preview may contain private text; it is not an automatically redacted report and must not be uploaded blindly. Editing the preview does not modify the stored payload.
+
+For one supported, non-stale plain-text replay candidate, choose:
+
+- `Replay saved input after quota recovery`: send the exact original text, preserving whitespace and the complete question/answer. Do not append the generic continuation.
+- `Continue existing work after quota recovery`: explicitly choose the configured continuation.
+- Cancel: keep the input waiting; send nothing.
+
+A choice is bound to the exact source fingerprint. New input, edits, stale/incomplete reads or an in-flight dispatch invalidate stale choices. The command queues an action and **does not send immediately or bypass quota**. It does not approve commands, grant sandbox/network permissions or replay an expired approval request.
+
+The status bar shows `Review Input` for unresolved evidence and opens this review action. `Show Status` distinguishes replay, continuation and verification. `Resume Now` on an input-aware Armed target no longer silently substitutes the generic prompt or bypasses the quota confirmation path.
+
+## Input and storage limits
+
+- Automatic/manual replay currently supports exactly one plain-text content part with explicit empty `text_elements` and no unknown fields. Images, skills, mentions, attachments, multiple text parts and unknown metadata are not flattened.
+- Multiple unresolved user inputs are retained oldest-first and held for review, not reduced to the latest message or submitted as separate concurrent tasks.
+- Stored content is bounded to 256 KiB; oversized input is explicitly reported as `input_too_large`, not truncated and mislabeled complete. It remains in the original conversation where available, not in a claimed complete local snapshot.
+- Full-history reads are bounded to 5 pages of 10 turns and 4 MiB, stop at a prior execution/non-quota boundary, and fail closed for unsupported full views, duplicate IDs, malformed pages or cursor loops.
+- Recovery plans are stored in the extension's workspace state, not in the project repository. This is ordinary local extension storage, **not encrypted secret storage**. Output never includes raw saved prompt text. Existing quota-failed history is not deleted or rewritten.
+- UI-only input that never reaches a readable persisted turn cannot be recovered by this feature. There is no keyboard interception, clipboard scraping, DOM scraping or modification of the official extension.
+
+## Safety and compatibility
+
+The monitoring app-server remains read-only for real work. Source fingerprints and selected action are rechecked after owner discovery immediately before official IPC submission. Disabled/replaced targets and unreadable preflight history cancel a definitely-unsent claim; post-transport ambiguity preserves the existing durable fence. The official IPC payload/routing, model inheritance, proxy resolution, workspace isolation and Primer exclusion are unchanged.
+
+Stable `inProgress` confirmation now also requires substantive, unambiguous recorded input progress; lifecycle allocation, empty placeholders and prior work before a new steering input do not establish successful handling. `interrupted/error=none` remains tracked, not auto-retried. Normal completed-turn Disarm and structured re-exhaustion re-arm are retained.
+
+A native/manual continuation already visible on the same thread prevents an additional automatic send. Content equality alone is not an exactly-once guarantee; it is used only to match an already-recorded replay attempt to an observed input. Cross-host coordination remains outside scope. Pending/Armed work still suppresses Primer on the same host storage; one Primer host per account remains required. Issue #3 (Primer failure retry hardening) is separate.
+
+## Validation evidence
+
+- Original 0.3.10 baseline: 173/173 tests passed before integration.
+- Local Node 22 isolated working copy: `npm run check`, full `npm test` **249/249**, and `git diff --check` passed.
+- Integration source commit: `bfe2312d3190cd56f35ea68b5aa03bc6d20347b5`.
+- GitHub Actions [CI #153](https://github.com/Me2yhm/codex_auto_resume/actions/runs/38899023922): install, typecheck, tests, VSIX packaging and artifact upload PASS.
+- The exact GitHub source snapshot was downloaded into a separate isolated runtime and re-tested: **249/249 PASS**. Its only difference from the earlier local copy was wording in an existing UI IPC diagnostic, not runtime behavior.
+- A temporary read-only source-snapshot workflow was used to obtain locked compiler dependencies without credentials or account data. It is removed before final PR review; `.github/workflows/ci.yml` is unchanged.
+
+The 76 added tests cover source-specific classification, empty placeholders, history bounds, late answers while Armed/Verifying, same-turn steering, multiple inputs, structured payload retention, exact plain-text replay, explicit review, source edits during dialogs/owner discovery, quota failure during confirmation, lifecycle cancellation, repeated exhaustion, bounded retries, native continuation, replay lineage, reloads, secret-free diagnostics and completed Disarm. Original regression fixtures explicitly select legacy mode because they contain summary-only turn data; the new controller tests enable input-aware mode and exercise the real final-send guard.
+
+## Required real-environment review
+
+Install only a review VSIX in a non-critical workspace initially. Keep `userOnlyPolicy=review`. Use `Inspect Recovery Input` for the three actual sample classes, verify original input completeness locally with `Review Recovery Input`, and confirm the official installed extension version. A real replay into the same conversation, new input during an Armed wait, reload persistence and a second quota exhaustion must be checked before broad release. Avoid manufacturing quota exhaustion or changing existing active task permissions.
+
+Until these checks and independent code review pass, PR #4 stays Draft. Main and the stable 0.3.10 build are unchanged. No claim is made that all installed Codex versions can be classified automatically or that every attachment/approval type is supported.
