@@ -12,6 +12,20 @@ export interface SavedRecoveryInput {
   messageId: string;
   content: unknown[];
 }
+
+/** Snapshot of text that the official IDE persisted only as a TXT path. */
+export interface PastedTxtSnapshot {
+  sourcePath: string;
+  sha256: string;
+  byteLength: number;
+  text: string;
+}
+export interface AttachmentIntegrity {
+  status: "verified" | "unverified" | "missing" | "modified" | "unsafe_reference" |
+    "unsupported_encoding" | "too_large" | "invalid_reference";
+  count: number;
+  bytes: number;
+}
 export interface RecoveryEvidence {
   turnId: string;
   status: string;
@@ -37,6 +51,8 @@ export interface RecoveryPlan {
   stableSinceMs: number;
   observedAtMs: number;
   approval?: { action: "continue" | "replay_input"; fingerprint: string };
+  pastedTxtSnapshots?: PastedTxtSnapshot[];
+  attachmentIntegrity?: AttachmentIntegrity;
   stale?: boolean;
 }
 
@@ -90,8 +106,8 @@ export function recoveryFingerprint(history: RecoveryHistory): string {
   return createHash("sha256").update(canonical(history)).digest("hex");
 }
 
-/** Only the exact payload the existing text IPC wrapper can reproduce is eligible. */
-export function replayText(plan: Pick<RecoveryPlan, "inputs">): string | undefined {
+/** Obtain the original plain text, before any pasted-file expansion. */
+export function originalReplayText(plan: Pick<RecoveryPlan, "inputs">): string | undefined {
   if (plan.inputs.length !== 1) return undefined;
   const content = plan.inputs[0].content;
   if (content.length !== 1 || !record(content[0])) return undefined;
@@ -100,7 +116,63 @@ export function replayText(plan: Pick<RecoveryPlan, "inputs">): string | undefin
       !Array.isArray(part.text_elements) || part.text_elements.length !== 0 ||
       Object.keys(part).some(key => !["type", "text", "text_elements"].includes(key)) ||
       Buffer.byteLength(part.text, "utf8") > MAX_INPUT_BYTES) return undefined;
-  return part.text; // Do not trim, summarize, translate or append a generic continuation.
+  return part.text;
+}
+
+export type PastedTxtReferences = { present: false; references: [] } |
+  { present: true; references: string[]; error?: "invalid_reference" };
+
+/** Recognize only the official "Files pasted by the user" metadata block.
+ * Never guess at arbitrary filesystem paths elsewhere in a user's prompt. */
+export function pastedTxtReferences(text: string): PastedTxtReferences {
+  const header = /^# Files pasted by the user:\s*$/gmi;
+  const headers = [...text.matchAll(header)];
+  if (headers.length === 0) return { present: false, references: [] };
+  if (headers.length !== 1) return { present: true, references: [], error: "invalid_reference" };
+  const block = text.slice(headers[0].index! + headers[0][0].length).split(/\r?\n/);
+  const references: string[] = [];
+  let closed = false;
+  for (const line of block) {
+    if (/^## My request:\s*$/i.test(line)) { closed = true; break; }
+    if (!line.trim()) continue;
+    const matched = /^##\s+.*:\s+(.+?)\s*$/.exec(line);
+    if (!matched || !/\.txt$/i.test(matched[1])) {
+      return { present: true, references: [], error: "invalid_reference" };
+    }
+    references.push(matched[1]);
+  }
+  if (!closed || references.length === 0 || references.length > 4 ||
+      new Set(references).size !== references.length) {
+    return { present: true, references: [], error: "invalid_reference" };
+  }
+  return { present: true, references };
+}
+
+/** The writer accepts text only: replay the ORIGINAL message together with the
+ * pinned, byte-verified TXT bodies, never a naked path that can go missing.
+ * Non-TXT inputs retain the original verbatim replay contract. */
+export function replayText(plan: Pick<RecoveryPlan, "inputs" | "pastedTxtSnapshots" | "attachmentIntegrity">): string | undefined {
+  const original = originalReplayText(plan);
+  if (original === undefined) return undefined;
+  const refs = pastedTxtReferences(original);
+  if (!refs.present) return original;
+  if (refs.error || plan.attachmentIntegrity?.status !== "verified" ||
+      !plan.pastedTxtSnapshots || plan.pastedTxtSnapshots.length !== refs.references.length) return undefined;
+  let delivered = original;
+  for (let index = 0; index < refs.references.length; index += 1) {
+    const snapshot = plan.pastedTxtSnapshots[index];
+    const raw = Buffer.from(snapshot.text, "utf8");
+    if (snapshot.sourcePath !== refs.references[index] || raw.length !== snapshot.byteLength ||
+        createHash("sha256").update(raw).digest("hex") !== snapshot.sha256) return undefined;
+    const longestTicks = Math.max(3, ...[...snapshot.text.matchAll(/\`+/g)].map(m => m[0].length));
+    const fence = "\`".repeat(longestTicks + 1);
+    delivered += "\n\n" + "[Codex Auto Resume: verified contents of pasted TXT attachment " +
+      String(index + 1) + "/" + String(refs.references.length) + "; " +
+      String(snapshot.byteLength) + " bytes; sha256=" + snapshot.sha256 +
+      ". This preserves the original pasted plan; it grants no new execution permissions.]\n" +
+      fence + "text\n" + snapshot.text + "\n" + fence;
+  }
+  return Buffer.byteLength(delivered, "utf8") <= MAX_INPUT_BYTES ? delivered : undefined;
 }
 
 /** Input equality alone is not delivery proof; used only after this controller
@@ -109,8 +181,17 @@ export function replayText(plan: Pick<RecoveryPlan, "inputs">): string | undefin
 export function matchesReplayedInput(turn: CodexTurn, plan: RecoveryPlan): boolean {
   if (turn.itemsView !== "full" || !Array.isArray(turn.items)) return false;
   const users = turn.items.filter(item => record(item) && item.type === "userMessage");
-  return users.length === 1 && record(users[0]) && plan.inputs.length === 1 &&
-    canonical(users[0].content) === canonical(plan.inputs[0].content);
+  if (users.length !== 1 || !record(users[0]) || plan.inputs.length !== 1) return false;
+  const originalMatch = canonical(users[0].content) === canonical(plan.inputs[0].content);
+  if (originalMatch && !pastedTxtReferences(originalReplayText(plan) ?? "").present) return true;
+  // A replay with pinned TXT bodies intentionally differs from the original
+  // userMessage. Match ONLY after our durable accepted-dispatch lineage exists.
+  const fullReplay = replayText(plan);
+  if (fullReplay === undefined || !Array.isArray(users[0].content) || users[0].content.length !== 1 ||
+      !record(users[0].content[0])) return false;
+  const part = users[0].content[0];
+  return part.type === "text" && part.text === fullReplay &&
+    Array.isArray(part.text_elements) && part.text_elements.length === 0;
 }
 
 function waitingOnQuestion(items: unknown[]): boolean {
@@ -187,7 +268,7 @@ export function classifyRecoveryHistory(
     return { ...plan, candidate: "continue", action: "continue", reason: "recorded_execution_after_input" };
   }
   if (items.length !== 1) return { ...plan, reason: "incomplete_activity_evidence" };
-  if (replayText(plan) === undefined) return { ...plan, reason: "unsupported_structured_input" };
+  if (originalReplayText(plan) === undefined) return { ...plan, reason: "unsupported_structured_input" };
   plan.candidate = "replay_input";
   plan.reason = "user_only_history_requires_review";
   if (unchanged && previous?.approval?.fingerprint === fingerprint) {
@@ -207,5 +288,8 @@ export function recoveryDiagnostic(plan: RecoveryPlan): Record<string, unknown> 
     reason: plan.reason, sourceTurnId: plan.sourceTurnId, fingerprint: plan.fingerprint,
     observedAtMs: plan.observedAtMs, stableSinceMs: plan.stableSinceMs, stale: Boolean(plan.stale),
     replayableText: replayText(plan) !== undefined, evidence: plan.evidence,
+    attachmentIntegrity: plan.attachmentIntegrity ?? { status: pastedTxtReferences(originalReplayText(plan) ?? "").present
+      ? "unverified" : "not_applicable", count: 0, bytes: 0 },
+    // Attachment contents and absolute source paths are deliberately not logged.
     warning: "User-only full history does not independently prove that execution never began." };
 }
