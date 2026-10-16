@@ -125,6 +125,9 @@ export async function materializePastedTxt(
  * This is read-only. A replaced, deleted, or unreadable original blocks send. */
 export async function verifyPastedTxtBeforeSend(plan: RecoveryPlan, codexHomeOverride?: string): Promise<boolean> {
   if (plan.action !== "replay_input") return true;
+  // An inconsistent/restored plan cannot use a stale "verified" snapshot to
+  // bypass the file read and final guard.
+  if (plan.candidate !== "replay_input") return false;
   const validated = await materializePastedTxt(plan, plan, codexHomeOverride);
   return validated.attachmentIntegrity?.status !== "verified"
     ? !pastedTxtReferences(originalReplayText(plan) ?? "").present
