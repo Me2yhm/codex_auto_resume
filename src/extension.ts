@@ -1,10 +1,11 @@
 import * as vscode from "vscode";
 import { AutoResumeController } from "./autoResumeController";
 import { diagnoseOfficialCodex } from "./diagnostics";
+import { redactedOutputChannel } from "./diagnosticRedaction";
 import { QuotaPrimerController } from "./quotaPrimerController";
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  const output = vscode.window.createOutputChannel("Codex Auto Resume");
+  const output = redactedOutputChannel(vscode.window.createOutputChannel("Codex Auto Resume"));
   const controller = new AutoResumeController(context, output);
   const quotaPrimer = new QuotaPrimerController(context, output);
 

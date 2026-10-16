@@ -11,6 +11,7 @@ export async function sendTurnThroughOfficialCodexUi(
   output: vscode.OutputChannel,
   logPrefix: string,
   overrides: CodexTurnStartOverrides = {},
+  beforeStartTurn?: () => Promise<void>,
 ): Promise<boolean> {
   await surfaceOfficialCodexThread(threadId, output, logPrefix);
 
@@ -26,6 +27,7 @@ export async function sendTurnThroughOfficialCodexUi(
       await delay(1_000);
     }
     if (!ownerClientId) return false;
+    await beforeStartTurn?.();
     await ipc.startTurn(threadId, prompt, versions, ownerClientId, overrides);
     return true;
   } finally {
@@ -40,6 +42,7 @@ export async function trySendTurnThroughExistingOfficialOwner(
   output: vscode.OutputChannel,
   logPrefix: string,
   overrides: CodexTurnStartOverrides = {},
+  beforeStartTurn?: () => Promise<void>,
 ): Promise<boolean> {
   let ownerClientId: string | undefined;
   let ipc: CodexUiIpcClient | undefined;
@@ -53,6 +56,7 @@ export async function trySendTurnThroughExistingOfficialOwner(
       `[${logPrefix}] silent owner discovery: ${ownerClientId ?? "<none>"}`,
     );
     if (!ownerClientId) return false;
+    await beforeStartTurn?.();
     await ipc.startTurn(threadId, prompt, versions, ownerClientId, overrides);
     return true;
   } catch (error) {

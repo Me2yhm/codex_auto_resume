@@ -2,7 +2,7 @@
   "name": "codex-auto-resume",
   "displayName": "Codex Auto Resume",
   "description": "Automatically resume interrupted OpenAI Codex work and prime rolling quota windows after reset.",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "publisher": "me2yhm",
   "private": true,
   "license": "UNLICENSED",
@@ -99,7 +99,7 @@
         "codexAutoResume.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Automatically resume a recently interrupted VS Code Codex thread after its usage limit resets."
+          "description": "Automatically resume a recent VS Code Codex thread with a confirmed quota interruption after two independent available quota reads."
         },
         "codexAutoResume.resumePrompt": {
           "type": "string",
@@ -116,7 +116,7 @@
           "type": "number",
           "default": 90,
           "minimum": 0,
-          "description": "Extra delay after the reported reset time before resuming."
+          "description": "Legacy allowance for the expected reset time. Two independent available quota reads at least 10 seconds apart can resume earlier; this is not a minimum wait before resuming."
         },
         "codexAutoResume.resumeStabilitySeconds": {
           "type": "number",
@@ -172,7 +172,7 @@
           "default": 15,
           "minimum": 0,
           "scope": "machine",
-          "description": "Random preflight delay before a primer request. This reduces duplicate primers when multiple VS Code windows are running."
+          "description": "Random preflight delay before an automatic primer request. Window-motion confirmation still requires fresh observations at least 15 seconds apart when jitter is zero."
         },
         "codexAutoResume.quotaPrimer.prompt": {
           "type": "string",
@@ -184,7 +184,7 @@
           "type": "string",
           "default": "luna",
           "scope": "machine",
-          "description": "Preferred low-cost model name or substring for Primer turns. The extension resolves it dynamically with model/list and falls back if unavailable."
+          "description": "Preferred low-cost model name or substring for Primer turns, resolved dynamically with model/list. Unavailable models suppress the request unless allowModelFallback is enabled."
         },
         "codexAutoResume.quotaPrimer.reasoningEffort": {
           "type": "string",

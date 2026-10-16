@@ -4,7 +4,7 @@ import { classifyQuotaAvailability } from "./quotaAvailability";
 import { RecoveryCoordinator } from "./recoveryCoordination";
 import { isPrimerThread } from "./primerIdentity";
 import { readQuotaPrimerSendJournal } from "./quotaPrimerSendJournal";
-import { claimWorkResume } from "./workRecoveryDispatch";
+import { claimWorkResume, readWorkResumeDispatch } from "./workRecoveryDispatch";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
 import { sendTurnThroughOfficialCodexUi } from "./officialCodexUi";
@@ -43,6 +43,7 @@ export class AutoResumeController implements vscode.Disposable {
   private tickEpoch?: number;
   private availabilityCandidate?: { threadId: string; armedAtMs: number; observedAtMs: number };
   private lastObservation?: string;
+  private lastUnconfirmedLegacyThread?: string;
   private lastResumeObservation?: string;
   private lastThreadSelectionDiagnostic?: string;
   private lastStaleThreadDiagnostic?: string;
@@ -530,13 +531,21 @@ export class AutoResumeController implements vscode.Disposable {
       if (tracking?.resumeTurnId) await this.checkTrackedResumeAttempt(tracking, null);
       return;
     }
+    if (armed.reason === "rateLimitReached" && !classifyLimitError(before)) {
+      if (this.lastUnconfirmedLegacyThread !== armed.threadId) {
+        this.output.appendLine(`[auto-resume] retaining legacy armed thread ${armed.threadId}; its structured quota cause must be confirmed before automatic continuation`);
+        this.lastUnconfirmedLegacyThread = armed.threadId;
+      }
+      return;
+    }
+    this.lastUnconfirmedLegacyThread = undefined;
     if (!this.canMonitor() || this.armed()?.armedAtMs !== armed.armedAtMs) return;
     const claim = await claimWorkResume(this.context.globalStorageUri.fsPath, {
       threadId: armed.threadId, beforeTurnId: before.id, sentAtMs: Date.now(),
     });
     const pending: ArmedResume = {
       ...armed,
-      dispatchPending: { beforeTurnId: claim.record.beforeTurnId, sentAtMs: claim.record.sentAtMs },
+      dispatchPending: { beforeTurnId: claim.record.beforeTurnId, sentAtMs: claim.record.sentAtMs, hostClaimToken: claim.record.token },
     };
     // Both the host claim and workspace intent precede transport. Other
     // windows adopt this exact attempt, even after its owner crashes.
@@ -575,6 +584,22 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   private async checkPendingDispatch(armed: ArmedResume): Promise<void> {
+    const pending = armed.dispatchPending!;
+    if (pending.hostClaimToken && pending.beforeTurnId) {
+      const host = await readWorkResumeDispatch(this.context.globalStorageUri.fsPath, {
+        threadId: armed.threadId, beforeTurnId: pending.beforeTurnId,
+      });
+      if (!this.canMonitor() || this.armed()?.dispatchPending?.hostClaimToken !== pending.hostClaimToken) return;
+      if (!host) {
+        await this.saveArmed({ ...armed, dispatchPending: undefined });
+        this.output.appendLine("[auto-resume] same-host continuation was definitively not sent; returning to fresh availability confirmation");
+        return;
+      }
+      if (host.token !== pending.hostClaimToken) {
+        armed = { ...armed, dispatchPending: { beforeTurnId: host.beforeTurnId, sentAtMs: host.sentAtMs, hostClaimToken: host.token } };
+        await this.saveArmed(armed);
+      }
+    }
     const turn = await this.findTurnAfterDispatch(armed.threadId, armed.dispatchPending!.beforeTurnId, armed.dispatchPending!.sentAtMs);
     if (!turn) return;
     await this.trackResumeTurn(armed, turn);

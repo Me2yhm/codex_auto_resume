@@ -10,8 +10,21 @@ The project provides unattended recovery for VS Code Codex tasks interrupted by 
 
 The implementation has two independent automation paths:
 
-- **Auto Resume** monitors Codex quota/thread state, persists an interrupted work thread, waits for the reported reset, surfaces the exact conversation, resumes it through the official Codex UI IPC path, and verifies the resumed turn before disarming.
+- **Auto Resume** monitors Codex quota/thread state, persists a work turn with a structured quota error, confirms quota availability through two independent reads at least 10 seconds apart, and resumes the exact conversation through official Codex UI IPC. Confirmed availability can resume work before the expected reset time; the resumed turn is verified before disarming.
 - **Quota Window Primer** tracks primary/secondary rolling reset boundaries and, when a reset would otherwise remain dormant, sends one tiny request in a dedicated persistent low-cost-model thread so the next rolling window starts immediately.
+
+## v0.3.10 changes and review status
+
+- Both modules share a fail-closed quota classifier. Network errors, malformed responses, and contradictory quota fields do not permit a send. An account quota blocker alone never makes a manual Stop eligible for Auto Resume; a structured quota error on the work turn is required.
+- Work recovery has priority over Primer across VS Code windows sharing one host's extension storage. Pending, Armed, and Verifying work suppress Primer sends while quota monitoring continues.
+- Automatic work continuations persist a durable dispatch claim before official UI IPC. Other windows adopt that attempt, and an ambiguous acknowledgement or a delayed new turn cannot trigger a duplicate send. A definitive no-owner result permits a later confirmed retry.
+- Primer combines a short shared send lock with a persistent send journal. Automatic sends require fresh moving-window evidence from observations at least 15 seconds apart, including when jitter is zero. Manual Prime Quota Now also respects quota, active-work, recovery-priority, and unresolved-send guards.
+- Reset Primer Thread preserves known conversation IDs and unresolved confirmations. A bounded history of 256 IDs and trusted Primer metadata keep historical Primer conversations out of work discovery; ordinary work titles containing “Primer” remain eligible.
+- Work conversations keep their original model and reasoning settings. The official UI owner route and Remote proxy resolution remain unchanged.
+
+This version is prepared for Code Review. Local VSIX installation/UI smoke and real Remote SSH proxy, reload, and recovery smoke remain outstanding; deterministic automated tests do not replace those checks. Merge and release follow review and validation. To roll back, reinstall the 0.3.9 VSIX.
+
+Same-host coordination covers windows sharing extension storage on the same Local or Remote host. It does not coordinate different physical hosts or separate storage profiles. For one Codex account, enable automatic Primer in one designated Local or Remote environment only.
 
 ## Project layout
 
@@ -23,10 +36,16 @@ src/
   codexSpawnEnvironment.ts  VS Code/proxy-aware child environment resolution
   codexUiIpc.ts             Codex UI IPC follower client
   codexLocator.ts           locates the Codex executable
+  diagnosticRedaction.ts   output-channel and error-message redaction
+  quotaAvailability.ts      shared fail-closed quota classification
+  recoveryCoordination.ts  same-host work-priority leases
+  workRecoveryDispatch.ts  durable automatic work-dispatch claims
   quotaPrimerController.ts  quota-window priming state machine
   quotaPrimerState.ts       persistent primer state
   quotaPrimerWindowLogic.ts moving/fixed rolling-window classification
-  quotaPrimerLock.ts        same-host automatic-send serialization
+  quotaPrimerLock.ts        short same-host send lock
+  quotaPrimerSendJournal.ts shared pending-send and boundary state
+  primerIdentity.ts         current/historical Primer exclusion
   officialCodexUi.ts        shared UI IPC transport
   types.ts                  minimal protocol types
 
@@ -86,7 +105,7 @@ codex-auto-resume.vsix
 
 The packaging command explicitly uses `README.extension.md` as the VSIX README, so the project README and the installed extension description remain independent.
 
-GitHub Actions runs type-checking, quota-primer regression tests, VSIX packaging, and artifact upload on pushes to `main`.
+GitHub Actions is configured to run type-checking, the full regression suite, VSIX packaging, and artifact upload on pull requests and pushes to `main`.
 
 ## Install for testing
 
@@ -106,7 +125,7 @@ The extension declares:
 
 so it is intended to execute beside the Codex instance associated with the current workspace.
 
-## Current validated behavior
+## Previously validated behavior
 
 The Windows local flow has been validated end-to-end with a real usage-limit reset:
 
@@ -124,7 +143,7 @@ quota interruption
 
 Boundary testing also covers thread switching, Extension Host restart persistence, and two-stage resume verification.
 
-Remote SSH uses the same extension package but is validated separately because the Codex executable, account-network path, and IPC endpoint are provided by the remote environment. Version 0.3.7 makes account quota reads best-effort on Remote SSH: thread-store interruption observation continues across account endpoint timeouts, and ambiguous interrupted turns are persisted until quota state can confirm or reject them. Version 0.3.9 additionally reads the effective VS Code `http.proxy` setting before spawning the monitoring app-server, so Remote User Settings can directly supply the same SSH-forwarded proxy path used by the official Codex extension.
+Remote SSH uses the same extension package but is validated separately because the Codex executable, account-network path, and IPC endpoint are provided by the remote environment. Account quota reads are best-effort for thread observation: timeouts preserve the exact pending/armed target while sending remains blocked. In 0.3.10, an ambiguous interruption must acquire a structured quota error before it can arm; later account-level exhaustion alone is insufficient. Version 0.3.9 introduced the effective VS Code `http.proxy` setting before spawning the monitoring app-server, so Remote User Settings can directly supply the same SSH-forwarded proxy path used by the official Codex extension. That network-resolution chain is retained in 0.3.10.
 
 ## Packaging files
 

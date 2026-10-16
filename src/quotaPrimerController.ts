@@ -1,6 +1,7 @@
 import * as os from "os";
 import * as vscode from "vscode";
 import { classifyQuotaAvailability } from "./quotaAvailability";
+import { redactDiagnostic } from "./diagnosticRedaction";
 import { PRIMER_THREAD_SOURCE } from "./primerIdentity";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
@@ -89,6 +90,7 @@ interface DueWindows {
 
 interface PrimerDispatchHooks {
   beforeDispatch(threadId: string, beforeTurnId?: string): Promise<void>;
+  beforeStartTurn(threadId: string): Promise<void>;
   accepted(turnId?: string): Promise<void>;
   rejected(): Promise<void>;
 }
@@ -164,7 +166,7 @@ export class QuotaPrimerController implements vscode.Disposable {
       : "";
 
     void vscode.window.showInformationMessage(
-      `Codex Quota Primer is enabled. Thread: ${state.threadId ?? "<not created yet>"}${state.threadCwd ? ` (workspace: ${state.threadCwd})` : ""}. Model: ${state.model ?? "<not selected yet>"}${state.effort ? ` / ${state.effort}` : ""}. ${primary}; ${secondary}.${pending}`,
+      `Codex Quota Primer is enabled; ${this.waitingReason ? `waiting for available quota (${this.waitingReason})` : this.lastSuppression ? `deferred (${this.lastSuppression})` : "monitoring quota windows"}. Thread: ${state.threadId ?? "<not created yet>"}${state.threadCwd ? ` (workspace: ${state.threadCwd})` : ""}. Model: ${state.model ?? "<not selected yet>"}${state.effort ? ` / ${state.effort}` : ""}. ${primary}; ${secondary}.${pending}`,
     );
   }
 
@@ -257,6 +259,7 @@ export class QuotaPrimerController implements vscode.Disposable {
     try {
       await this.ensureClient();
       let limits = await this.readRateLimits();
+      this.quotaLooksAvailable(limits);
       let journal = await this.publishKnownPrimerIdentities(this.state(), await this.readJournal());
       let state = this.mergeJournal(this.reconcileTracking(this.state(), limits), journal);
       this.logObservation(state, limits);
@@ -270,6 +273,7 @@ export class QuotaPrimerController implements vscode.Disposable {
       }
       const candidates = this.candidateWindows(state, limits);
       if (!manual && !candidates.primary && !candidates.secondary) {
+        if (this.quotaLooksAvailable(limits)) this.lastSuppression = undefined;
         await this.saveState(state);
         return;
       }
@@ -329,7 +333,21 @@ export class QuotaPrimerController implements vscode.Disposable {
               throw error;
             }
           },
+          beforeStartTurn: async (threadId) => {
+            try {
+              limits = await this.readRateLimits();
+              await this.requireSafety(limits, threadId, manual, lifecycle);
+              if (!manual) {
+                const fresh = this.finalDormantWindows(probe.state, limits, authorizedWindows, journal);
+                if (!fresh.primary && !fresh.secondary) throw new PrimerSuppressed("quota window became active or uncertain during owner discovery");
+              }
+            } catch (error) {
+              await hooks.rejected(); // This guard precedes the actual transport invocation.
+              throw error;
+            }
+          },
           accepted: async (turnId) => {
+            this.lastSuppression = undefined;
             if (pending && turnId) {
               pending = { ...pending, turnId };
               await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, { ...journal, threadId: pending.threadId, pending });
@@ -356,7 +374,8 @@ export class QuotaPrimerController implements vscode.Disposable {
         await sendLock.release();
       }
     } catch (error) {
-      const message = (error as Error).message;
+      const message = redactDiagnostic((error as Error).message);
+      if (!this.quotaResponse) this.waitingReason = "quota read unavailable";
       this.suppressed(message);
       if (manual) void vscode.window.showWarningMessage(`Codex Quota Primer cannot prime now: ${message}.`);
       if (!(error instanceof PrimerSuppressed)) {
@@ -808,6 +827,7 @@ export class QuotaPrimerController implements vscode.Disposable {
         this.output,
         logPrefix,
         { model: model.model, effort: model.effort },
+        () => hooks.beforeStartTurn(state.threadId!),
       );
       if (sentSilently) {
         await hooks.accepted();
@@ -853,6 +873,7 @@ export class QuotaPrimerController implements vscode.Disposable {
             this.output,
             logPrefix,
             { model: model.model, effort: model.effort },
+            () => hooks.beforeStartTurn(state.threadId!),
           );
           if (sent) {
             await hooks.accepted();
@@ -1295,9 +1316,9 @@ export class QuotaPrimerController implements vscode.Disposable {
     }
 
     const state = this.state();
-    if (this.waitingReason && !state.pendingConfirmation) {
+    if ((this.waitingReason || this.lastSuppression) && !state.pendingConfirmation) {
       this.statusBar.text = "$(clock) Codex Primer: Waiting";
-      this.statusBar.tooltip = `Enabled; waiting for available quota (${this.waitingReason}); monitoring continues`;
+      this.statusBar.tooltip = `Enabled; ${this.waitingReason ? `waiting for available quota (${this.waitingReason})` : `deferred (${this.lastSuppression})`}; monitoring continues`;
       return;
     }
     if (state.pendingConfirmation) {
@@ -1509,6 +1530,7 @@ async function startPrimerTurnAndWait(
 
   try {
     await hooks.beforeDispatch(threadId, beforeTurnId);
+    await hooks.beforeStartTurn(threadId);
     const response = await client.request<TurnStartResponse>("turn/start", {
       threadId,
       input: [{ type: "text", text: prompt, text_elements: [] }],

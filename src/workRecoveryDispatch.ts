@@ -15,6 +15,20 @@ export type WorkResumeClaim =
   | { status: "claimed"; record: WorkResumeDispatch; releaseUnsent(): Promise<void> }
   | { status: "existing"; record: WorkResumeDispatch };
 
+/** Read without acquiring: a missing tokenized claim was definitively unsent. */
+export async function readWorkResumeDispatch(
+  globalStoragePath: string,
+  expected: { threadId: string; beforeTurnId: string },
+): Promise<WorkResumeDispatch | undefined> {
+  const filename = dispatchPath(globalStoragePath, expected);
+  try {
+    return await readDispatch(filename, expected);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 /**
  * An interrupted work turn has one durable dispatch claim across VS Code
  * windows. Claims never expire: an absent acknowledgement cannot prove that
@@ -30,12 +44,8 @@ export async function claimWorkResume(
     throw new Error("Invalid work recovery dispatch identity");
   }
   const expected = { threadId: request.threadId, beforeTurnId: request.beforeTurnId };
-  const directory = path.join(globalStoragePath, DISPATCH_DIRECTORY);
-  const identity = createHash("sha256")
-    .update(JSON.stringify([request.threadId, request.beforeTurnId]))
-    .digest("hex");
-  const filename = path.join(directory, `${identity}.json`);
-  await fs.mkdir(directory, { recursive: true });
+  const filename = dispatchPath(globalStoragePath, expected);
+  await fs.mkdir(path.dirname(filename), { recursive: true });
 
   let handle;
   try {
@@ -85,6 +95,17 @@ export async function claimWorkResume(
       return releasing;
     },
   };
+}
+
+function dispatchPath(globalStoragePath: string, expected: { threadId: string; beforeTurnId: string }): string {
+  if (typeof expected.threadId !== "string" || !expected.threadId ||
+      typeof expected.beforeTurnId !== "string" || !expected.beforeTurnId) {
+    throw new Error("Invalid work recovery dispatch identity");
+  }
+  const identity = createHash("sha256")
+    .update(JSON.stringify([expected.threadId, expected.beforeTurnId]))
+    .digest("hex");
+  return path.join(globalStoragePath, DISPATCH_DIRECTORY, `${identity}.json`);
 }
 
 async function readDispatch(

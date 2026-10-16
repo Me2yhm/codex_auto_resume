@@ -88,6 +88,7 @@ export interface ArmedResume {
   dispatchPending?: {
     beforeTurnId?: string;
     sentAtMs: number;
+    hostClaimToken?: string;
   };
   resumeInProgressSinceMs?: number;
   // Set only after a continuation has been accepted by the official Codex UI
