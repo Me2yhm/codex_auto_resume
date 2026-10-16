@@ -424,7 +424,7 @@ test('TXT modification during official owner discovery cancels a definitely-unse
   h.advance(); await h.tick(); h.advance(); await h.tick();
   assert.equal(h.sent.length, 0);
   assert.equal(h.state().dispatchPending, undefined);
-  assert.equal(h.state().replayAttempts, undefined);
+  assert.equal(h.state().replayAttempts, 0);
   h.advance(); await h.tick();
   assert.equal(h.state().recoveryPlan.action, 'needs_review');
   assert.equal(h.state().recoveryPlan.reason, 'attachment_modified');
