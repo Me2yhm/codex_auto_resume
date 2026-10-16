@@ -32,6 +32,9 @@ interface RateLimitReadResult {
   limits: RateLimitSnapshot | null;
 }
 
+/** Only thrown before IPC startTurn, when no continuation could have been sent. */
+class WorkContinuationPreflightCancelled extends Error {}
+
 export class AutoResumeController implements vscode.Disposable {
   private readonly recovery: RecoveryCoordinator;
   private coordinationUnavailable = false;
@@ -564,7 +567,38 @@ export class AutoResumeController implements vscode.Disposable {
       this.output.appendLine(`[auto-resume] adopting the same-host pending continuation for ${armed.threadId}; no duplicate will be sent`);
       return;
     }
-    const sent = await this.sendThroughOfficialUi(armed.threadId, this.resumePrompt(), "auto-resume");
+    let sent: boolean;
+    try {
+      sent = await this.sendThroughOfficialUi(armed.threadId, this.resumePrompt(), "auto-resume", async () => {
+        // Owner discovery and editor mounting are asynchronous. The user may
+        // disable Auto Resume or manually continue the exact conversation while
+        // we are finding the official writer. Recheck immediately before IPC
+        // startTurn instead of relying on the earlier dispatch snapshot.
+        const currentAttempt = this.armed();
+        if (!this.canMonitor() || !currentAttempt?.dispatchPending ||
+            currentAttempt.threadId !== armed.threadId ||
+            currentAttempt.dispatchPending.hostClaimToken !== claim.record.token ||
+            currentAttempt.dispatchPending.beforeTurnId !== before.id) {
+          throw new WorkContinuationPreflightCancelled("recovery state changed during owner discovery");
+        }
+        const latest = await this.latestTurn(armed.threadId);
+        if (!this.canMonitor() || this.armed()?.dispatchPending?.hostClaimToken !== claim.record.token ||
+            !latest || latest.id !== before.id ||
+            (latest.status !== "failed" && latest.status !== "interrupted")) {
+          throw new WorkContinuationPreflightCancelled("work conversation changed during owner discovery");
+        }
+      });
+    } catch (error) {
+      // A failed pre-send guard proves startTurn was never called. Other IPC
+      // exceptions are ambiguous and must retain the durable dispatch claim.
+      if (!(error instanceof WorkContinuationPreflightCancelled)) throw error;
+      await claim.releaseUnsent();
+      if (this.canMonitor() && this.armed()?.dispatchPending?.hostClaimToken === claim.record.token) {
+        await this.saveArmed({ ...pending, dispatchPending: undefined });
+      }
+      this.output.appendLine(`[auto-resume] cancelled unsent continuation for ${armed.threadId}: ${error.message}; no duplicate will be submitted without fresh confirmation`);
+      return;
+    }
     if (!sent) {
       await claim.releaseUnsent();
       if (this.canMonitor() && this.armed()?.dispatchPending?.sentAtMs === pending.dispatchPending!.sentAtMs) {
@@ -717,8 +751,13 @@ export class AutoResumeController implements vscode.Disposable {
     return "pending";
   }
 
-  private async sendThroughOfficialUi(threadId: string, prompt: string, logPrefix: string): Promise<boolean> {
-    return sendTurnThroughOfficialCodexUi(threadId, prompt, this.output, logPrefix);
+  private async sendThroughOfficialUi(
+    threadId: string,
+    prompt: string,
+    logPrefix: string,
+    beforeStartTurn?: () => Promise<void>,
+  ): Promise<boolean> {
+    return sendTurnThroughOfficialCodexUi(threadId, prompt, this.output, logPrefix, {}, beforeStartTurn);
   }
 
   private scheduleNextTick(): void {
