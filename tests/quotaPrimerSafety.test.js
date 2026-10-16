@@ -55,6 +55,7 @@ function harness(t, directory, options = {}) {
       throw new Error(`Unexpected ${method}`);
     },
     send: options.send,
+    mocks: options.mocks,
   });
   h.controller.waitForUiPrimerTurn = options.wait ?? (async () => completed);
   h.controller.waitForMotionSample = async (observedAtMs) => { clock.now = Math.max(clock.now, observedAtMs + 15_000); };
@@ -343,7 +344,14 @@ test('a confirmed non-quota terminal Primer failure releases pending for a later
 test('zero-percent fixed window after a new real request cannot pass the final motion guard', async (t) => {
   const clock = { now: NOW };
   let reads = 0;
-  const h = harness(t, await storage(t), { clock, request(method) {
+  const h = harness(t, await storage(t), { clock, mocks: {
+    './officialCodexUi': {
+      trySendTurnThroughExistingOfficialOwner: async (_thread, _prompt, _out, _prefix, _overrides, guard) => {
+        await guard();
+        return true;
+      },
+    },
+  }, request(method) {
     if (method !== 'account/rateLimits/read') return;
     reads += 1;
     // Following the first dispatch safety pass, real work starts at +17s.
