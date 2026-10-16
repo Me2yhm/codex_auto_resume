@@ -52,6 +52,7 @@ test("manual continuation during owner discovery cancels stale automatic dispatc
     attempted += 1;
     return true;
   };
+  await h.controller.ensureClient();
   await h.controller.tryAutomaticResume(h.state());
   assert.equal(attempted, 0);
   assert.equal(h.state().dispatchPending, undefined);
