@@ -1,0 +1,26 @@
+name: review-workspace
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.head_ref == 'feature/input-aware-quota-recovery'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check && npm test
+      - name: Package isolated source and locked compiler dependencies
+        run: tar -czf /tmp/review-workspace.tgz src tests scripts docs node_modules dist package.json package-lock.json tsconfig.json README.md README.extension.md AGENTS.md .vscodeignore .gitignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: input-recovery-review-workspace
+          path: /tmp/review-workspace.tgz
+          retention-days: 1
+          if-no-files-found: error
