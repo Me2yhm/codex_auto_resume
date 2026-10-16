@@ -2,22 +2,59 @@
 
 Codex Auto Resume is a companion extension for the official OpenAI Codex VS Code extension.
 
+## v0.3.11 review build: input-aware recovery
+
+This build adds a recovery-content decision to the existing Auto Resume flow. It is not a new task queue or an independent writer for work conversations.
+
+- **Continue:** complete history shows one unambiguous user input followed by substantive agent output or recorded tool activity; resume existing work with the configured continuation.
+- **Replay input:** resend the exact saved plain-text prompt or selection-generated question/answer after quota recovery, without appending the generic continuation. When the original plain text includes a verified official pasted TXT reference, the original message is preserved and the pinned TXT body is appended verbatim.
+- **Review input:** retain the target and supported input snapshot, but send nothing when the evidence is incomplete, ambiguous, unsupported or contains multiple unresolved inputs.
+
+**Conservative default:** a full failed turn containing only a user message is a replay candidate, not proof that execution never began. The default `review` policy asks you to decide for that exact input. Empty assistant/reasoning placeholders and `inProgress` lifecycle status alone are not treated as executed work.
+
+New quota-rejected input is checked while already Armed and again immediately before sending. It can replace a stale generic recovery target. Once a replay starts doing work and later exhausts quota again, subsequent recovery continues that work instead of restarting the original task.
+
+### Inspect and review
+
+`Codex Auto Resume: Inspect Recovery Input` opens an untitled **structural diagnostic** with item types, IDs, classification reason and official extension version. It does not send a prompt or include raw prompt/tool text.
+
+`Codex Auto Resume: Review Recovery Input` opens a **local preview containing your original input**, then offers replay or continuation for an eligible single plain-text candidate. The choice is bound to the current source fingerprint; changed or unreadable history invalidates a stale choice. Choosing an action queues it; it does not send immediately or bypass the two available-quota reads. Cancel keeps the input waiting. Preview edits do not change the stored input. Do not share the raw preview without checking it for secrets.
+
+```json
+{
+  "codexAutoResume.inputRecovery.enabled": true,
+  "codexAutoResume.inputRecovery.userOnlyPolicy": "review"
+}
+```
+
+The optional `replayStableUserOnly` policy automatically selects replay after at least two stable full-history observations separated by 10 seconds. **It is an opt-in heuristic, not an authoritative execution-stage signal. Validate the installed Codex build first.** The actual send still requires independent quota confirmation and source/owner checks. Automatic replay is capped at two attempts for the tracked retry chain; uncertain delivery is never blindly retried.
+
+Replay supports one plain-text input with empty `text_elements`. **Special case: pasted TXT attachments** referenced by the official `# Files pasted by the user:` metadata block are read from that extension host's Codex attachments directory, snapshotted with byte size and SHA-256, and included in full in the replay message (not merely re-sent as a path). `Inspect Recovery Input` exposes only redacted integrity metadata; `Review Recovery Input` displays the original reference and verified byte count/digests. The file must still exist and match the pinned snapshot immediately before the official IPC send; missing, changed, oversized, unsafe or undecodable TXT files block sending. Each TXT is limited to 192 KiB; the complete replay message remains bounded to 256 KiB. Snapshots preserve original UTF-8 bytes and are never silently replaced by later file edits. Replayed embedded TXT is not appended a second time on later quota retries.
+
+Images, skills, unsupported attachments, multiple content parts, multiple unresolved messages, expired approvals and unknown metadata are not flattened or silently dropped into a generic continuation. They remain held with an explicit reason. Stored inputs and TXT snapshots use ordinary extension workspace storage, which is **not encrypted secret storage**; neither raw input nor TXT body is written into Output or project files. A snapshot is captured at the first successful *read after the quota-failed turn*, not necessarily at the original IDE submission instant. Check the digest against the intended source before approving a sensitive job. UI-only messages that never enter readable history cannot be recovered by this path.
+
+Turning the input-aware setting off cannot bypass an already-saved recovery plan. Do not disable Auto Resume or downgrade while an important input/dispatch remains unresolved: first inspect it and retain any needed content in a safe location.
+
+Real Local/Remote full-history classification and replay acceptance are still review gates. The stable main version remains 0.3.10 until the draft feature PR is reviewed and merged.
+
+## Features
+
 It provides two independent automation features:
 
-1. **Auto Resume** — continues a real work conversation after a usage-limit interruption.
+1. **Auto Resume** — continues a real work conversation after a usage-limit interruption, using the input-aware recovery decision above.
 2. **Quota Window Primer** — sends a tiny request after a rolling quota reset so the next quota window starts counting immediately instead of waiting for your next real work session.
 
 The two features use separate state and separate conversations.
 
 ## Auto Resume
 
-When a work turn reports a structured quota error, Auto Resume remembers that exact turn and conversation. It independently reads account quota twice, at least 10 seconds apart, before reopening the same conversation and sending the configured continuation prompt. Confirmed quota recovery can resume work before the reported reset time, including an unexpected early account reset.
+When a work turn reports a structured quota error, Auto Resume remembers that exact turn and conversation. It independently reads account quota twice, at least 10 seconds apart, before reopening the same conversation and sending the selected recovery message. Confirmed quota recovery can resume work before the reported reset time, including an unexpected early account reset.
 
 The reported reset time is an expectation, not a required wait. Network errors, unknown quota state, and contradictory responses cancel availability confirmation while keeping the recovery target. An interrupted turn without a structured quota error, including a manual Stop, cannot become eligible just because the account is blocked.
 
 The continuation uses the official Codex UI owner and inherits the work conversation's model and reasoning settings. Before submitting, Auto Resume persists a dispatch record shared by windows on the same host. If acknowledgement is lost or the new turn is slow to appear, it keeps verifying that attempt without resending, including after a window reload. A definitive no-owner response leaves the task armed for a later confirmed retry.
 
-A resumed turn briefly marked `interrupted` without an error remains under verification. A completed turn disarms immediately; an in-progress turn must remain continuously stable for the configured stability interval.
+A resumed turn briefly marked `interrupted` without an error remains under verification. A completed turn can disarm; an in-progress turn must remain continuously stable for the configured stability interval, with unambiguous recorded input progress in input-aware mode. A newer quota-failed user answer is retained instead of losing it when the older turn finishes.
 
 Enable it from the Command Palette:
 
@@ -67,7 +104,7 @@ The first time a primer is actually needed, the extension creates a dedicated pe
 Codex Auto Resume - Quota Primer
 ```
 
-Future primer requests reuse that conversation instead of creating a new one.
+Future primer requests reuse the same thread.
 
 The current and historical Primer conversations are isolated from Auto Resume work-thread discovery. The extension retains up to 256 known Primer IDs and also recognizes trusted Primer metadata when the current ID is missing. A normal work conversation whose title merely contains “Primer” is still eligible.
 
@@ -83,7 +120,7 @@ luna
 
 If multiple matching models are available, lightweight variants are preferred. Primer also selects the lowest supported reasoning effort by default.
 
-If the preferred model is unavailable, Primer now **skips the automatic request by default** rather than silently falling back to a potentially more expensive model. You can opt into fallback behavior with `codexAutoResume.quotaPrimer.allowModelFallback`.
+If the preferred model is unavailable, Primer **skips the automatic request by default** rather than silently falling back to a potentially more expensive model. You can opt into fallback behavior with `codexAutoResume.quotaPrimer.allowModelFallback`.
 
 The model override applies only to the dedicated Primer conversation. Auto Resume never changes the model of your real work conversation.
 
@@ -157,6 +194,8 @@ For Remote SSH workspaces, install both extensions on the **SSH remote** side.
 - `Codex Auto Resume: Disable`
 - `Codex Auto Resume: Show Status`
 - `Codex Auto Resume: Resume Now`
+- `Codex Auto Resume: Inspect Recovery Input`
+- `Codex Auto Resume: Review Recovery Input`
 
 ### Quota Primer
 
@@ -185,7 +224,9 @@ Open VS Code Settings and search for **Codex Auto Resume**, or edit Settings JSO
   "codexAutoResume.pollIntervalSeconds": 60,
   "codexAutoResume.resetGraceSeconds": 90,
   "codexAutoResume.resumeStabilitySeconds": 15,
-  "codexAutoResume.recentThreadMinutes": 480
+  "codexAutoResume.recentThreadMinutes": 480,
+  "codexAutoResume.inputRecovery.enabled": true,
+  "codexAutoResume.inputRecovery.userOnlyPolicy": "review"
 }
 ```
 
@@ -246,21 +287,13 @@ Detailed logs are available from:
 View -> Output -> Codex Auto Resume
 ```
 
-Auto Resume log lines use the `[auto-resume]` prefix.
-
-Quota Primer log lines use the `[quota-primer]` prefix.
-
-This separation makes it easy to distinguish work recovery from quota-window priming.
+Auto Resume log lines use the `[auto-resume]` prefix. Quota Primer log lines use the `[quota-primer]` prefix. Recovery decisions log only action, reason, source ID and preserved-input count, not the original prompt.
 
 ## Local and Remote SSH behavior
 
-The extension is a workspace extension.
+The extension is a workspace extension. For Remote SSH projects, install the same VSIX on the remote host beside the remote Codex extension. Auto Resume is workspace-oriented and can be enabled independently in local and remote workspaces.
 
-For Remote SSH projects, install the same VSIX on the remote host beside the remote Codex extension.
-
-Auto Resume is workspace-oriented and can be enabled independently in local and remote workspaces.
-
-On Remote SSH, the extension reads VS Code's **effective** `http.proxy` setting through the VS Code configuration API and passes that value to the spawned Codex app-server as HTTP/HTTPS proxy environment. The 0.3.9 proxy-resolution chain and official UI IPC route are retained in 0.3.10. The proxy value is never hard-coded, so changing Remote User Settings changes the next spawned monitoring app-server.
+On Remote SSH, the extension reads VS Code's **effective** `http.proxy` setting through the VS Code configuration API and passes that value to the spawned Codex app-server as HTTP/HTTPS proxy environment. The existing proxy-resolution chain and official UI IPC route are retained. The proxy value is never hard-coded, so changing Remote User Settings changes the next spawned monitoring app-server.
 
 Network-source precedence is:
 
@@ -284,7 +317,8 @@ Auto Resume:
 - keeps a task armed if the correct Codex UI owner cannot be found;
 - preserves an ambiguous dispatch across windows and reloads without sending a duplicate;
 - inherits the work conversation's model and reasoning settings;
-- verifies the resumed turn before disarming.
+- verifies the resumed turn before disarming;
+- does not turn a saved answer into a new permission grant or replay an expired approval RPC.
 
 Quota Primer:
 
@@ -303,8 +337,6 @@ Quota Primer:
 - does not bypass approval prompts;
 - uses a prompt that explicitly forbids file inspection, tools, and modifications.
 
-## v0.3.10 review status
+## Review status
 
-This version adds early quota-recovery confirmation, shared fail-closed quota decisions, work-first same-host coordination, durable dispatch tracking, and historical Primer isolation.
-
-Local VSIX installation/UI smoke and real Remote SSH proxy, reload, and recovery smoke remain outstanding during Code Review. Release follows review and validation. Roll back by reinstalling the 0.3.9 VSIX.
+Version 0.3.11 adds input-aware recovery on top of the merged 0.3.10 baseline. Deterministic tests do not replace real full-history inspection of the installed official Codex build. Keep the default review policy until that evidence and the draft PR have been reviewed. Rollback requires resolving/copying saved user input and any uncertain sends first; the older version does not understand input recovery plans.
