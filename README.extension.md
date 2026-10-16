@@ -97,7 +97,7 @@ Codex Auto Resume: Enable Quota Primer
 
 Primer is intentionally disabled by default.
 
-**Important:** For a single Codex account, enable automatic Primer in one designated Local or Remote environment only.
+**Important:** For a single Codex account, enable automatic Primer in one designated Local or Remote environment only. If your important Auto Resume work runs on Remote SSH, prefer enabling Primer **on that same Remote extension host** and disabling automatic Primer on Windows Local: the Work-first priority journal cannot coordinate across Local/Remote hosts. Do not switch enable settings while a real continuation is pending or verifying.
 
 The setting is machine-scoped so local and Remote SSH instances can be configured independently.
 
