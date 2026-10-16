@@ -1,14 +1,25 @@
 import * as os from "os";
 import * as vscode from "vscode";
+import { classifyQuotaAvailability } from "./quotaAvailability";
+import { redactDiagnostic } from "./diagnosticRedaction";
+import { PRIMER_THREAD_SOURCE } from "./primerIdentity";
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
 import { tryAcquireQuotaPrimerSendLock } from "./quotaPrimerLock";
+import { readRecoveryPriority } from "./recoveryCoordination";
+import {
+  QuotaPrimerJournalPending,
+  QuotaPrimerSendJournal,
+  readQuotaPrimerSendJournal,
+  writeQuotaPrimerSendJournal,
+} from "./quotaPrimerSendJournal";
 import {
   sendTurnThroughOfficialCodexUi,
   trySendTurnThroughExistingOfficialOwner,
 } from "./officialCodexUi";
 import {
   QUOTA_PRIMER_STATE_KEY,
+  migrateQuotaPrimerState,
   QuotaPrimerPendingConfirmation,
   QuotaPrimerState,
   QuotaPrimerWindowState,
@@ -19,6 +30,7 @@ import {
   WindowMotion,
   WindowProbeClassification,
   windowLooksLikeDormantCandidate,
+  WINDOW_PROBE_MIN_ELAPSED_MS,
 } from "./quotaPrimerWindowLogic";
 import {
   CodexThread,
@@ -31,7 +43,6 @@ import {
 } from "./types";
 
 const PRIMER_THREAD_NAME = "Codex Auto Resume - Quota Primer";
-const PRIMER_THREAD_SOURCE = "codex-auto-resume-primer";
 const RESET_JITTER_TOLERANCE_MS = 5_000;
 const WINDOW_PROBE_RETRY_MS = 120_000;
 const UI_PRIMER_STABILITY_MS = 15_000;
@@ -77,11 +88,25 @@ interface DueWindows {
   secondary?: number;
 }
 
+interface PrimerDispatchHooks {
+  beforeDispatch(threadId: string, beforeTurnId?: string): Promise<void>;
+  beforeStartTurn(threadId: string): Promise<void>;
+  accepted(turnId?: string): Promise<void>;
+  rejected(): Promise<void>;
+}
+
+class PrimerSuppressed extends Error {}
+
 export class QuotaPrimerController implements vscode.Disposable {
   private client?: CodexRpcClient;
   private timer?: NodeJS.Timeout;
   private running = false;
+  private disposed = false;
+  private lifecycle = 0;
+  private lastSuppression?: string;
   private lastObservation?: string;
+  private quotaResponse?: RateLimitsReadResponse;
+  private waitingReason?: string;
   private statusBar: vscode.StatusBarItem;
 
   constructor(
@@ -113,6 +138,7 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   async disable(): Promise<void> {
+    this.lifecycle += 1;
     await vscode.workspace
       .getConfiguration("codexAutoResume")
       .update("quotaPrimer.enabled", false, vscode.ConfigurationTarget.Global);
@@ -140,60 +166,52 @@ export class QuotaPrimerController implements vscode.Disposable {
       : "";
 
     void vscode.window.showInformationMessage(
-      `Codex Quota Primer is enabled. Thread: ${state.threadId ?? "<not created yet>"}${state.threadCwd ? ` (workspace: ${state.threadCwd})` : ""}. Model: ${state.model ?? "<not selected yet>"}${state.effort ? ` / ${state.effort}` : ""}. ${primary}; ${secondary}.${pending}`,
+      `Codex Quota Primer is enabled; ${this.waitingReason ? `waiting for available quota (${this.waitingReason})` : this.lastSuppression ? `deferred (${this.lastSuppression})` : "monitoring quota windows"}. Thread: ${state.threadId ?? "<not created yet>"}${state.threadCwd ? ` (workspace: ${state.threadCwd})` : ""}. Model: ${state.model ?? "<not selected yet>"}${state.effort ? ` / ${state.effort}` : ""}. ${primary}; ${secondary}.${pending}`,
     );
   }
 
   async primeNow(): Promise<void> {
-    await this.ensureClient();
-    const limits = await this.readRateLimits();
-    if (this.quotaLooksBlocked(limits)) {
-      void vscode.window.showWarningMessage(
-        "Codex Quota Primer cannot prime now because the account is currently quota-blocked.",
-      );
-      return;
-    }
-
-    const state = this.reconcileTracking(this.state(), limits);
-    await this.saveState(state);
-    const result = await this.sendPrimer(state, "quota-primer-manual");
-    if (!result.turn || !primerTurnAccepted(result.turn)) {
-      void vscode.window.showWarningMessage(
-        `Codex Quota Primer did not get a confirmed successful primer turn${result.turn ? ` (status=${result.turn.status}, error=${formatPrimerTurnError(result.turn)})` : ""}. See the Codex Auto Resume output for details.`,
-      );
-      return;
-    }
-
-    const freshLimits = await this.readRateLimits();
-    const refreshed = this.reconcileTracking(
-      {
-        ...this.state(),
-        lastPrimeAtMs: Date.now(),
-      },
-      freshLimits,
-    );
-    await this.saveState(refreshed);
-    void vscode.window.showInformationMessage(
-      `Codex Quota Primer sent a manual primer turn on ${result.threadId} using ${result.model.model}${result.model.effort ? ` / ${result.model.effort}` : ""}.`,
-    );
+    await this.runPrimer(true);
   }
 
   async resetPrimerThread(): Promise<void> {
-    const state = this.state();
-    await this.saveState({
-      ...state,
-      threadId: undefined,
-      threadCwd: undefined,
-      model: undefined,
-      effort: undefined,
-      pendingConfirmation: undefined,
-    });
-    void vscode.window.showInformationMessage(
-      "Codex Quota Primer forgot its dedicated thread. The next primer will create a new dedicated conversation.",
-    );
+    if (this.running) {
+      void vscode.window.showWarningMessage("Quota Primer is checking or confirming a turn. Retry Reset Quota Primer Thread after this check finishes.");
+      return;
+    }
+    const lock = await tryAcquireQuotaPrimerSendLock(this.context.globalStorageUri.fsPath, this.output);
+    if (!lock) return;
+    try {
+      const state = this.state();
+      const journal = await this.readJournal();
+      if (journal.updatedAtMs === 0 && state.pendingConfirmation && !state.threadId) {
+        throw new Error("Legacy pending Primer has no thread identity");
+      }
+      const pending = journal.updatedAtMs === 0 && state.pendingConfirmation && state.threadId
+        ? { ...state.pendingConfirmation, threadId: state.threadId } : journal.pending;
+      const history = migrateQuotaPrimerState({
+        ...state,
+        knownPrimerThreadIds: [...(state.knownPrimerThreadIds ?? []), ...(journal.knownPrimerThreadIds ?? []),
+          ...(journal.threadId ? [journal.threadId] : []), ...(journal.pending ? [journal.pending.threadId] : [])],
+      }).knownPrimerThreadIds;
+      await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, {
+        ...journal, threadId: undefined, knownPrimerThreadIds: history, pending,
+      });
+      await this.saveState({
+        ...state, threadId: undefined, knownPrimerThreadIds: history, threadCwd: undefined,
+        model: undefined, effort: undefined, pendingConfirmation: pending,
+      });
+      void vscode.window.showInformationMessage(
+        "Quota Primer reset its reuse target. Historical Primer conversations remain excluded from work recovery; an unconfirmed send remains tracked.",
+      );
+    } catch {
+      void vscode.window.showWarningMessage("Quota Primer could not safely reset its shared state. Check the extension output and try again.");
+    } finally { await lock.release(); }
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.lifecycle += 1;
     if (this.timer) clearTimeout(this.timer);
     this.client?.dispose();
     this.statusBar.dispose();
@@ -206,11 +224,15 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   private state(): QuotaPrimerState {
-    return this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY) ?? {};
+    return migrateQuotaPrimerState(this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY));
   }
 
   private async saveState(state: QuotaPrimerState): Promise<void> {
-    await this.context.globalState.update(QUOTA_PRIMER_STATE_KEY, state);
+    const previous = this.state();
+    const migrated = migrateQuotaPrimerState({ ...state,
+      knownPrimerThreadIds: [...(previous.knownPrimerThreadIds ?? []), ...(state.knownPrimerThreadIds ?? [])],
+    });
+    await this.context.globalState.update(QUOTA_PRIMER_STATE_KEY, migrated);
   }
 
   private async ensureClient(): Promise<void> {
@@ -223,154 +245,331 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   private async tick(): Promise<void> {
-    if (!this.enabled() || this.running) return;
-    this.running = true;
+    await this.runPrimer(false);
+  }
 
+  private async runPrimer(manual: boolean): Promise<void> {
+    if (this.disposed || (!manual && !this.enabled())) return;
+    if (this.running) {
+      if (manual) void vscode.window.showWarningMessage("Codex Quota Primer is already checking or confirming a primer; no additional request was sent.");
+      return;
+    }
+    this.running = true;
+    const lifecycle = this.lifecycle;
     try {
       await this.ensureClient();
       let limits = await this.readRateLimits();
-      let state = this.reconcileTracking(this.state(), limits);
+      this.quotaLooksAvailable(limits);
+      let journal = await this.publishKnownPrimerIdentities(this.state(), await this.readJournal());
+      let state = this.mergeJournal(this.reconcileTracking(this.state(), limits), journal);
       this.logObservation(state, limits);
-
+      await this.saveState(state);
       if (state.pendingConfirmation) {
-        state = await this.reconcilePendingConfirmation(state, limits);
+        await this.refreshPendingJournal(state, journal, limits);
+        journal = await this.readJournal();
+        state = this.mergeJournal(this.reconcileTracking(this.state(), limits), journal);
         await this.saveState(state);
-        if (state.pendingConfirmation) return;
+        if (state.pendingConfirmation) throw new PrimerSuppressed("a primer continuation is awaiting confirmation");
       }
-
       const candidates = this.candidateWindows(state, limits);
-      if (!candidates.primary && !candidates.secondary) {
+      if (!manual && !candidates.primary && !candidates.secondary) {
+        if (this.quotaLooksAvailable(limits)) this.lastSuppression = undefined;
         await this.saveState(state);
         return;
       }
-
-      if (this.quotaLooksBlocked(limits)) {
-        this.output.appendLine(
-          `[quota-primer] quota-window candidate detected (${formatDueWindows(candidates)}), but another quota blocker is still active; waiting`,
-        );
-        await this.saveState(state);
-        return;
-      }
-
-      if (await this.hasActiveCodexThread(state.threadId)) {
-        this.output.appendLine(
-          `[quota-primer] quota-window candidate detected (${formatDueWindows(candidates)}), but Codex currently has an active work thread; waiting for natural usage to settle the window`,
-        );
-        await this.saveState(state);
-        return;
-      }
-
+      await this.requireSafety(limits, state.threadId, manual, lifecycle);
       const observedAtMs = Date.now();
-      const probe = this.probeCandidateWindows(state, limits, candidates, observedAtMs);
+      const probe = manual ? { state, moving: candidates, fixed: {}, unknown: {} }
+        : this.probeCandidateWindows(state, limits, candidates, observedAtMs);
       state = probe.state;
       await this.saveState(state);
-
-      if (probe.fixed.primary || probe.fixed.secondary) {
-        this.output.appendLine(
-          `[quota-primer] ${formatDueWindows(probe.fixed)} window(s) already have a fixed resetAt, so real Codex usage has already started them; no primer needed for those windows`,
-        );
-      }
-
       const dormant = probe.moving;
-      if (!dormant.primary && !dormant.secondary) {
-        if (probe.unknown.primary || probe.unknown.secondary) {
-          this.output.appendLine(
-            `[quota-primer] need another rate-limit sample before classifying ${formatDueWindows(probe.unknown)} as dormant or active`,
-          );
-        }
-        return;
-      }
-
-      this.output.appendLine(
-        `[quota-primer] detected dormant ${formatDueWindows(dormant)} window(s): resetAt is moving with wall clock instead of staying fixed`,
-      );
-
-      const jitterMs = this.jitterMs();
-      if (jitterMs > 0) {
-        this.output.appendLine(
-          `[quota-primer] waiting ${Math.round(jitterMs / 1000)}s before the final primer preflight check`,
-        );
-        await delay(jitterMs);
-      }
-
-      const sendLock = await tryAcquireQuotaPrimerSendLock(
-        this.context.globalStorageUri.fsPath,
-        this.output,
-      );
-      if (!sendLock) return;
-
+      if (!manual && !dormant.primary && !dormant.secondary) return;
+      if (!manual) await delay(this.jitterMs());
+      if (!manual) await this.waitForMotionSample(observedAtMs);
+      // Jitter can overlap work recovery, quota exhaustion, or a window becoming
+      // fixed through natural usage. All three are checked again before locking.
+      limits = await this.readRateLimits();
+      await this.requireSafety(limits, state.threadId, manual, lifecycle);
+      const sendLock = await tryAcquireQuotaPrimerSendLock(this.context.globalStorageUri.fsPath, this.output);
+      if (!sendLock) throw new PrimerSuppressed("another window is preparing a primer");
+      let pending: QuotaPrimerJournalPending | undefined;
+      let authorizedWindows: DueWindows = {};
       try {
-        // Re-read shared state only after acquiring the same-host lock. Another
-        // VS Code window may have sent a primer while this instance was waiting
-        // in jitter or lock contention.
-        const sharedState = this.state();
-        if (sharedState.pendingConfirmation) {
-          this.output.appendLine(
-            `[quota-primer] another extension host already has primer turn ${sharedState.pendingConfirmation.turnId ?? "<unknown>"} awaiting confirmation; skipping this send`,
-          );
-          return;
-        }
-
+        journal = await this.readJournal();
+        state = this.mergeJournal(this.state(), journal);
+        if (state.pendingConfirmation) throw new PrimerSuppressed("another window has an unconfirmed primer");
         limits = await this.readRateLimits();
-        state = this.reconcileTracking(sharedState, limits);
-        if (this.quotaLooksBlocked(limits) || await this.hasActiveCodexThread(state.threadId)) {
-          this.output.appendLine(
-            "[quota-primer] final preflight no longer permits a primer; keeping the dormant boundary pending",
-          );
-          await this.saveState(state);
-          return;
-        }
-
-        const result = await this.sendPrimer(state, "quota-primer");
-        if (!result.turn || !primerTurnAccepted(result.turn)) {
-          if (result.turn) {
-            this.output.appendLine(
-              `[quota-primer] primer turn ${result.turn.id} was not accepted as successful; status=${result.turn.status}; error=${formatPrimerTurnError(result.turn)}; keeping the dormant boundary pending`,
+        await this.requireSafety(limits, state.threadId, manual, lifecycle);
+        const hooks: PrimerDispatchHooks = {
+          beforeDispatch: async (threadId, beforeTurnId) => {
+            limits = await this.readRateLimits();
+            await this.requireSafety(limits, threadId, manual, lifecycle);
+            journal = await this.readJournal();
+            if (journal.pending) throw new PrimerSuppressed("another primer is awaiting confirmation");
+            authorizedWindows = manual ? candidates : this.finalDormantWindows(
+              probe.state, limits, dormant, journal,
             );
-          }
-          await this.saveState(this.state());
-          return;
+            if (!manual && !authorizedWindows.primary && !authorizedWindows.secondary) {
+              throw new PrimerSuppressed("quota window is fixed or its motion is uncertain");
+            }
+            pending = {
+              threadId, beforeTurnId, manual,
+              primaryResetAtMs: authorizedWindows.primary, secondaryResetAtMs: authorizedWindows.secondary,
+              primaryProbeObservedAtMs: authorizedWindows.primary ? Date.now() : undefined,
+              primaryProbeResetAtMs: authorizedWindows.primary ? resetAtMs(limits?.primary ?? null) : undefined,
+              secondaryProbeObservedAtMs: authorizedWindows.secondary ? Date.now() : undefined,
+              secondaryProbeResetAtMs: authorizedWindows.secondary ? resetAtMs(limits?.secondary ?? null) : undefined,
+              sentAtMs: Date.now(),
+            };
+            await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, { ...journal, threadId, pending, knownPrimerThreadIds: state.knownPrimerThreadIds });
+            await this.saveState({ ...this.state(), threadId, pendingConfirmation: pending });
+            try {
+              const recovery = await readRecoveryPriority(this.context.globalStorageUri.fsPath);
+              this.requireLifecycle(manual, lifecycle);
+              if (recovery.status !== "clear") throw new PrimerSuppressed("active or uncertain recovery has priority");
+            } catch (error) {
+              await hooks.rejected();
+              throw error;
+            }
+          },
+          beforeStartTurn: async (threadId) => {
+            try {
+              limits = await this.readRateLimits();
+              await this.requireSafety(limits, threadId, manual, lifecycle);
+              if (!manual) {
+                // A request can start a window between the older motion probe
+                // and owner discovery yet still round to 0% usage. Re-sample
+                // across a fresh interval, not merely from the old baseline.
+                const firstObservedAtMs = Date.now();
+                const first = limits;
+                await this.waitForMotionSample(firstObservedAtMs);
+                limits = await this.readRateLimits();
+                await this.requireSafety(limits, threadId, manual, lifecycle);
+                const fresh = this.finalDormantWindows({
+                  ...probe.state,
+                  primary: { ...probe.state.primary, probeObservedAtMs: firstObservedAtMs,
+                    probeResetAtMs: resetAtMs(first?.primary ?? null) },
+                  secondary: { ...probe.state.secondary, probeObservedAtMs: firstObservedAtMs,
+                    probeResetAtMs: resetAtMs(first?.secondary ?? null) },
+                }, limits, authorizedWindows, journal);
+                if (!fresh.primary && !fresh.secondary) throw new PrimerSuppressed("quota window became active or uncertain during owner discovery");
+              }
+            } catch (error) {
+              await hooks.rejected(); // This guard precedes the actual transport invocation.
+              throw error;
+            }
+          },
+          accepted: async (turnId) => {
+            this.lastSuppression = undefined;
+            if (pending && turnId) {
+              pending = { ...pending, turnId };
+              await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, { ...journal, threadId: pending.threadId, pending });
+              await this.saveState({ ...this.state(), pendingConfirmation: pending });
+            }
+            await sendLock.release();
+          },
+          rejected: async () => {
+            if (!pending) return;
+            await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, { ...journal, threadId: pending.threadId, pending: undefined });
+            await this.saveState({ ...this.state(), pendingConfirmation: undefined });
+            pending = undefined;
+          },
+        };
+        const result = await this.sendPrimer(state, manual ? "quota-primer-manual" : "quota-primer", hooks);
+        if (result.turn && pending) await this.recordObservedTurn(pending, result.turn);
+        if (manual) {
+          const message = result.turn && primerTurnAccepted(result.turn)
+            ? `Codex Quota Primer sent a manual primer turn on ${result.threadId} using ${result.model.model}.`
+            : "Codex Quota Primer sent one attempt and is awaiting confirmation; no duplicate will be sent.";
+          void vscode.window.showInformationMessage(message);
         }
-
-        const confirmationLimits = await this.readRateLimits();
-        const confirmationObservedAtMs = Date.now();
-        const pending: QuotaPrimerPendingConfirmation = {
-          primaryResetAtMs: dormant.primary,
-          secondaryResetAtMs: dormant.secondary,
-          primaryProbeObservedAtMs: dormant.primary ? confirmationObservedAtMs : undefined,
-          primaryProbeResetAtMs: dormant.primary
-            ? resetAtMs(confirmationLimits?.primary ?? null)
-            : undefined,
-          secondaryProbeObservedAtMs: dormant.secondary ? confirmationObservedAtMs : undefined,
-          secondaryProbeResetAtMs: dormant.secondary
-            ? resetAtMs(confirmationLimits?.secondary ?? null)
-            : undefined,
-          turnId: result.turn.id,
-          sentAtMs: Date.now(),
-        };
-        state = {
-          ...this.state(),
-          model: result.model.model,
-          effort: result.model.effort,
-          pendingConfirmation: pending,
-          lastPrimeAtMs: Date.now(),
-        };
-        await this.saveState(state);
-        this.output.appendLine(
-          `[quota-primer] sent one primer turn ${result.turn.id} for dormant ${formatDueWindows(dormant)} window(s); confirmation now requires resetAt to stop moving`,
-        );
       } finally {
         await sendLock.release();
       }
     } catch (error) {
-      this.output.appendLine(`[quota-primer] tick failed: ${(error as Error).message}`);
-      this.client?.dispose();
-      this.client = undefined;
+      const message = redactDiagnostic((error as Error).message);
+      if (!this.quotaResponse) this.waitingReason = "quota read unavailable";
+      this.suppressed(message);
+      if (manual) void vscode.window.showWarningMessage(`Codex Quota Primer cannot prime now: ${message}.`);
+      if (!(error instanceof PrimerSuppressed)) {
+        this.client?.dispose();
+        this.client = undefined;
+      }
     } finally {
       this.running = false;
       this.renderStatus();
       this.scheduleNextTick();
     }
+  }
+
+  private requireLifecycle(manual: boolean, lifecycle: number): void {
+    if (this.disposed || this.lifecycle !== lifecycle || (!manual && !this.enabled())) {
+      throw new PrimerSuppressed("primer checking was cancelled");
+    }
+  }
+
+  private async waitForMotionSample(observedAtMs: number): Promise<void> {
+    // Prove the window is still moving after the candidate sample. Comparing
+    // only to its older sample could miss real usage starting during jitter.
+    await delay(Math.max(0, WINDOW_PROBE_MIN_ELAPSED_MS - (Date.now() - observedAtMs)));
+  }
+
+  private async requireSafety(limits: RateLimitSnapshot | null, threadId: string | undefined,
+    manual: boolean, lifecycle: number): Promise<void> {
+    this.requireLifecycle(manual, lifecycle);
+    if (!this.quotaLooksAvailable(limits)) throw new PrimerSuppressed("account quota is blocked, unknown, or contradictory");
+    if (await this.hasActiveCodexThread(threadId)) throw new PrimerSuppressed("Codex has active work or its activity is unknown");
+    const recovery = await readRecoveryPriority(this.context.globalStorageUri.fsPath);
+    if (recovery.status !== "clear") {
+      throw new PrimerSuppressed(recovery.status === "active" ? "active recovery has priority" : "recovery coordination is unavailable");
+    }
+    this.requireLifecycle(manual, lifecycle);
+  }
+
+  private suppressed(reason: string): void {
+    if (reason !== this.lastSuppression) this.output.appendLine(`[quota-primer] primer suppressed: ${reason}; monitoring continues`);
+    this.lastSuppression = reason;
+  }
+
+  private async readJournal(): Promise<QuotaPrimerSendJournal> {
+    const result = await readQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath);
+    if (result.status !== "ready") throw new PrimerSuppressed(result.reason);
+    return result.journal;
+  }
+
+  private async publishKnownPrimerIdentities(local: QuotaPrimerState, journal: QuotaPrimerSendJournal): Promise<QuotaPrimerSendJournal> {
+    const localIds = migrateQuotaPrimerState(local).knownPrimerThreadIds!;
+    const known = new Set([...(journal.knownPrimerThreadIds ?? []), journal.threadId, journal.pending?.threadId]);
+    if (localIds.every(id => known.has(id))) return journal;
+    const lock = await tryAcquireQuotaPrimerSendLock(this.context.globalStorageUri.fsPath, this.output);
+    if (!lock) return journal;
+    try {
+      const fresh = await this.readJournal();
+      if (fresh.updatedAtMs === 0 && local.pendingConfirmation && !local.threadId) {
+        throw new PrimerSuppressed("legacy primer confirmation has no readable thread identity");
+      }
+      const next: QuotaPrimerSendJournal = {
+        ...fresh,
+        threadId: fresh.updatedAtMs === 0 ? local.threadId : fresh.threadId,
+        pending: fresh.updatedAtMs === 0 && local.pendingConfirmation && local.threadId
+          ? { ...local.pendingConfirmation, threadId: local.threadId } : fresh.pending,
+        knownPrimerThreadIds: [...(fresh.knownPrimerThreadIds ?? []), ...localIds],
+      };
+      await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, next);
+      return await this.readJournal();
+    } finally { await lock.release(); }
+  }
+
+  private mergeJournal(state: QuotaPrimerState, journal: QuotaPrimerSendJournal): QuotaPrimerState {
+    return {
+      ...state,
+      threadId: journal.updatedAtMs === 0 ? state.threadId : journal.pending?.threadId ?? journal.threadId,
+      knownPrimerThreadIds: migrateQuotaPrimerState({ ...state,
+        knownPrimerThreadIds: [...(state.knownPrimerThreadIds ?? []), ...(journal.knownPrimerThreadIds ?? []),
+          ...(journal.threadId ? [journal.threadId] : []), ...(journal.pending ? [journal.pending.threadId] : [])],
+      }).knownPrimerThreadIds,
+      // Only a missing journal can import legacy local state. An existing host
+      // journal supersedes stale per-window Memento confirmation caches.
+      pendingConfirmation: journal.updatedAtMs === 0 ? state.pendingConfirmation : journal.pending,
+      primary: journal.handledPrimaryResetAtMs === undefined ? state.primary
+        : { ...state.primary, lastHandledResetAtMs: journal.handledPrimaryResetAtMs,
+          trackedResetAtMs: Math.max(state.primary?.trackedResetAtMs ?? 0, journal.nextPrimaryResetAtMs ?? 0) || undefined },
+      secondary: journal.handledSecondaryResetAtMs === undefined ? state.secondary
+        : { ...state.secondary, lastHandledResetAtMs: journal.handledSecondaryResetAtMs,
+          trackedResetAtMs: Math.max(state.secondary?.trackedResetAtMs ?? 0, journal.nextSecondaryResetAtMs ?? 0) || undefined },
+    };
+  }
+
+  private finalDormantWindows(current: QuotaPrimerState,
+    limits: RateLimitSnapshot | null, due: DueWindows, journal: QuotaPrimerSendJournal): DueWindows {
+    const result: DueWindows = {};
+    for (const name of ["primary", "secondary"] as const) {
+      const boundary = due[name];
+      const handled = name === "primary" ? journal.handledPrimaryResetAtMs : journal.handledSecondaryResetAtMs;
+      if (!boundary || boundary === handled || !windowLooksLikeDormantCandidate(limits?.[name] ?? null, Date.now())) continue;
+      const sample = current[name];
+      if (classifyWindowMotion(sample?.probeObservedAtMs, sample?.probeResetAtMs,
+        Date.now(), resetAtMs(limits?.[name] ?? null)).motion === "moving") result[name] = boundary;
+    }
+    return result;
+  }
+
+  private async refreshPendingJournal(state: QuotaPrimerState, journal: QuotaPrimerSendJournal,
+    limits: RateLimitSnapshot | null): Promise<void> {
+    let pending = journal.pending ?? (state.pendingConfirmation && state.threadId
+      ? { ...state.pendingConfirmation, threadId: state.threadId } : undefined);
+    if (!pending) throw new PrimerSuppressed("legacy primer confirmation has no readable thread identity");
+    const initialSentAtMs = pending.sentAtMs;
+    // Migrate 0.3.9 pending confirmation under the same lock before inspecting it.
+    if (!journal.pending) {
+      const lock = await tryAcquireQuotaPrimerSendLock(this.context.globalStorageUri.fsPath, this.output);
+      if (!lock) throw new PrimerSuppressed("another window is checking primer confirmation");
+      try {
+        const fresh = await this.readJournal();
+        if (fresh.updatedAtMs !== 0) return;
+        await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, { ...fresh, threadId: pending.threadId, pending });
+      } finally { await lock.release(); }
+    }
+    if (!pending.turnId) {
+      const turn = await this.findTurnAfterDispatch(pending);
+      if (turn) pending = { ...pending, turnId: turn.id };
+    }
+    const turn = pending.turnId ? await this.turnById(pending.threadId, pending.turnId) : undefined;
+    let refreshed: QuotaPrimerState = { ...state, threadId: pending.threadId, pendingConfirmation: pending };
+    if (turn && (classifyPrimerQuotaError(turn) || turn.status === "failed" ||
+        (turn.status === "interrupted" && Boolean(turn.error)))) {
+      // The official turn has a terminal, unsuccessful outcome. Its quota
+      // window must still be probed anew before a later Primer send; only
+      // genuinely unobserved/ambiguous dispatches remain fenced indefinitely.
+      this.output.appendLine(`[quota-primer] primer turn ${turn.id} ended unsuccessfully (${turn.status}); clearing confirmed terminal attempt; a later send still requires fresh dormant-window evidence`);
+      refreshed.pendingConfirmation = undefined;
+    } else if (turn?.status === "completed" && this.quotaLooksAvailable(limits)) {
+      refreshed = pending.manual && !pending.primaryResetAtMs && !pending.secondaryResetAtMs
+        ? { ...refreshed, pendingConfirmation: undefined }
+        : await this.reconcilePendingConfirmation(refreshed, limits);
+    }
+    const lock = await tryAcquireQuotaPrimerSendLock(this.context.globalStorageUri.fsPath, this.output);
+    if (!lock) return;
+    try {
+      journal = await this.readJournal();
+      if (journal.pending?.sentAtMs !== initialSentAtMs || journal.pending.threadId !== pending.threadId) return;
+      await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, {
+        ...journal, pending: refreshed.pendingConfirmation ? { ...pending, ...refreshed.pendingConfirmation } : undefined,
+        handledPrimaryResetAtMs: refreshed.primary?.lastHandledResetAtMs ?? journal.handledPrimaryResetAtMs,
+        handledSecondaryResetAtMs: refreshed.secondary?.lastHandledResetAtMs ?? journal.handledSecondaryResetAtMs,
+        nextPrimaryResetAtMs: refreshed.primary?.trackedResetAtMs ?? journal.nextPrimaryResetAtMs,
+        nextSecondaryResetAtMs: refreshed.secondary?.trackedResetAtMs ?? journal.nextSecondaryResetAtMs,
+      });
+      await this.saveState(refreshed);
+    } finally { await lock.release(); }
+  }
+
+  private async findTurnAfterDispatch(pending: QuotaPrimerJournalPending): Promise<CodexTurn | undefined> {
+    const response = await this.client!.request<ThreadTurnsListResponse>("thread/turns/list", {
+      threadId: pending.threadId, limit: 20, sortDirection: "desc", itemsView: "summary",
+    });
+    if (!Array.isArray(response?.data)) return undefined;
+    const baseline = response.data.findIndex((turn) => turn.id === pending.beforeTurnId);
+    if (baseline > 0) return response.data[0];
+    if (baseline === 0) return undefined;
+    return response.data.find((turn) => typeof turn.startedAt === "number" && turn.id !== pending.beforeTurnId &&
+      (turn.startedAt < 10_000_000_000 ? turn.startedAt * 1000 : turn.startedAt) >= Math.floor(pending.sentAtMs / 1000) * 1000);
+  }
+
+  private async recordObservedTurn(pending: QuotaPrimerJournalPending, turn: CodexTurn): Promise<void> {
+    const lock = await tryAcquireQuotaPrimerSendLock(this.context.globalStorageUri.fsPath, this.output);
+    if (!lock) return;
+    try {
+      const journal = await this.readJournal();
+      if (journal.pending?.sentAtMs !== pending.sentAtMs || journal.pending.threadId !== pending.threadId) return;
+      const failed = Boolean(classifyPrimerQuotaError(turn));
+      await writeQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath, {
+        ...journal, pending: failed ? undefined : { ...journal.pending, turnId: turn.id },
+      });
+      await this.saveState({ ...this.state(), lastPrimeAtMs: Date.now(),
+        pendingConfirmation: failed ? undefined : { ...journal.pending, turnId: turn.id } });
+    } finally { await lock.release(); }
   }
 
   private reconcileTracking(state: QuotaPrimerState, limits: RateLimitSnapshot | null): QuotaPrimerState {
@@ -628,8 +827,10 @@ export class QuotaPrimerController implements vscode.Disposable {
   private async sendPrimer(
     state: QuotaPrimerState,
     logPrefix: string,
+    hooks: PrimerDispatchHooks,
   ): Promise<{ threadId: string; turn?: CodexTurn; model: PrimerModelChoice }> {
     const model = await this.choosePrimerModel();
+    await this.saveState({ ...this.state(), model: model.model, effort: model.effort });
     const prompt = this.prompt();
 
     if (state.threadId) {
@@ -638,14 +839,17 @@ export class QuotaPrimerController implements vscode.Disposable {
       // First ask the Codex UI router whether the official client already owns
       // this thread. If it does, send through that owner without surfacing the
       // conversation, so automatic priming stays invisible to the user.
+      await hooks.beforeDispatch(state.threadId, before?.id);
       const sentSilently = await trySendTurnThroughExistingOfficialOwner(
         state.threadId,
         prompt,
         this.output,
         logPrefix,
         { model: model.model, effort: model.effort },
+        () => hooks.beforeStartTurn(state.threadId!),
       );
       if (sentSilently) {
+        await hooks.accepted();
         const turn = await this.waitForUiPrimerTurn(
           state.threadId,
           before?.id,
@@ -653,13 +857,23 @@ export class QuotaPrimerController implements vscode.Disposable {
         );
         return { threadId: state.threadId, turn, model };
       }
+      await hooks.rejected();
 
+      let directDispatchStarted = false;
+      const directHooks: PrimerDispatchHooks = {
+        ...hooks,
+        beforeDispatch: async (threadId, beforeTurnId) => {
+          await hooks.beforeDispatch(threadId, beforeTurnId);
+          directDispatchStarted = true;
+        },
+      };
       try {
         // No official UI owner currently has the thread mounted. A short-lived
         // writer can therefore resume it without changing the visible Codex UI.
-        const turn = await this.writePrimerTurnDirect(state.threadId, prompt, model);
+        const turn = await this.writePrimerTurnDirect(state.threadId, prompt, model, directHooks, before?.id);
         return { threadId: state.threadId, turn, model };
       } catch (error) {
+        if (error instanceof PrimerSuppressed || directDispatchStarted) throw error;
         const message = (error as Error).message;
         this.output.appendLine(`[${logPrefix}] direct primer resume failed: ${message}`);
 
@@ -671,14 +885,17 @@ export class QuotaPrimerController implements vscode.Disposable {
           // A race can occur between silent owner discovery and acquiring the
           // writer lock. Surface the exact thread only as the final recovery
           // path, then route through the official owner.
+          await hooks.beforeDispatch(state.threadId, before?.id);
           const sent = await sendTurnThroughOfficialCodexUi(
             state.threadId,
             prompt,
             this.output,
             logPrefix,
             { model: model.model, effort: model.effort },
+            () => hooks.beforeStartTurn(state.threadId!),
           );
           if (sent) {
+            await hooks.accepted();
             const turn = await this.waitForUiPrimerTurn(
               state.threadId,
               before?.id,
@@ -686,6 +903,7 @@ export class QuotaPrimerController implements vscode.Disposable {
             );
             return { threadId: state.threadId, turn, model };
           }
+          await hooks.rejected();
           return { threadId: state.threadId, model };
         } else {
           return { threadId: state.threadId, model };
@@ -693,13 +911,14 @@ export class QuotaPrimerController implements vscode.Disposable {
       }
     }
 
-    const created = await this.createPrimerThread(prompt, model);
+    const created = await this.createPrimerThread(prompt, model, hooks);
     return { threadId: created.threadId, turn: created.turn, model };
   }
 
   private async createPrimerThread(
     prompt: string,
     model: PrimerModelChoice,
+    hooks: PrimerDispatchHooks,
   ): Promise<{ threadId: string; turn?: CodexTurn }> {
     const writer = this.createPrimerWriter();
     try {
@@ -743,6 +962,7 @@ export class QuotaPrimerController implements vscode.Disposable {
         prompt,
         model,
         this.output,
+        hooks,
       );
       return { threadId, turn };
     } finally {
@@ -754,6 +974,8 @@ export class QuotaPrimerController implements vscode.Disposable {
     threadId: string,
     prompt: string,
     model: PrimerModelChoice,
+    hooks: PrimerDispatchHooks,
+    beforeTurnId?: string,
   ): Promise<CodexTurn | undefined> {
     const writer = this.createPrimerWriter();
     try {
@@ -765,6 +987,8 @@ export class QuotaPrimerController implements vscode.Disposable {
         prompt,
         model,
         this.output,
+        hooks,
+        beforeTurnId,
       );
     } finally {
       writer.dispose();
@@ -782,7 +1006,7 @@ export class QuotaPrimerController implements vscode.Disposable {
       {
         name: "codex-auto-resume-primer",
         title: "Codex Auto Resume Quota Primer",
-        version: "0.3.9",
+        version: "0.3.10",
       },
     );
   }
@@ -854,12 +1078,14 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   private async readRateLimits(): Promise<RateLimitSnapshot | null> {
+    this.quotaResponse = undefined;
     try {
       const response = await this.client!.request<RateLimitsReadResponse>(
         "account/rateLimits/read",
         { excludeResetCreditDetails: true },
         30_000,
       );
+      this.quotaResponse = response;
       return response.rateLimits ?? null;
     } catch (error) {
       const message = (error as Error).message;
@@ -869,20 +1095,30 @@ export class QuotaPrimerController implements vscode.Disposable {
         {},
         30_000,
       );
+      this.quotaResponse = response;
       return response.rateLimits ?? null;
     }
   }
 
   private async hasActiveCodexThread(primerThreadId?: string): Promise<boolean> {
-    const response = await this.client!.request<ThreadListResponse>("thread/list", {
-      limit: 100,
-      sortKey: "updated_at",
-      sortDirection: "desc",
-      archived: false,
-    });
-    return response.data.some(
-      (thread) => thread.id !== primerThreadId && thread.status?.type === "active",
-    );
+    const seen = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const response: ThreadListResponse = await this.client!.request<ThreadListResponse>("thread/list", {
+        limit: 100, sortKey: "updated_at", sortDirection: "desc", archived: false, cursor,
+      });
+      if (!Array.isArray(response?.data) || !(response.nextCursor === null || typeof response.nextCursor === "string")) return true;
+      for (const thread of response.data) {
+        if (!thread || typeof thread.id !== "string" || !thread.status ||
+            !["active", "idle", "inactive", "notLoaded", "systemError"].includes(thread.status.type)) return true;
+        if (thread.id !== primerThreadId && (thread.status.type === "active" || thread.status.type === "systemError")) return true;
+      }
+      cursor = response.nextCursor;
+      if (cursor && seen.has(cursor)) return true;
+      if (cursor) seen.add(cursor);
+      if (seen.size > 100) return true;
+    } while (cursor);
+    return false;
   }
 
   private async latestTurnSafe(threadId: string): Promise<CodexTurn | undefined> {
@@ -924,12 +1160,15 @@ export class QuotaPrimerController implements vscode.Disposable {
     let turnId: string | undefined;
     let stableSinceMs: number | undefined;
     let lastStatus: string | undefined;
+    const pendingRead = await readQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath);
+    const pending = pendingRead.status === "ready" ? pendingRead.journal.pending : undefined;
 
     for (let attempt = 1; attempt <= UI_PRIMER_CONFIRMATION_POLLS; attempt += 1) {
       await delay(1_000);
 
       if (!turnId) {
-        const latest = await this.latestTurnSafe(threadId);
+        const latest = pending && pending.threadId === threadId && pending.beforeTurnId === beforeTurnId
+          ? await this.findTurnAfterDispatch(pending) : undefined;
         if (!latest?.id || latest.id === beforeTurnId) {
           if (attempt <= 12) {
             this.output.appendLine(
@@ -991,16 +1230,21 @@ export class QuotaPrimerController implements vscode.Disposable {
   }
 
   private quotaLooksBlocked(limits: RateLimitSnapshot | null): boolean {
-    if (!limits) return true;
-    if (limits.rateLimitReachedType) return true;
-    const windows = [limits.primary, limits.secondary].filter(
-      (window): window is RateLimitWindow => Boolean(window),
-    );
-    return windows.some((window) => window.usedPercent >= 99);
+    return classifyQuotaAvailability(this.quotaResponse && { ...this.quotaResponse, rateLimits: limits }).status === "blocked";
+  }
+
+  private quotaLooksAvailable(limits: RateLimitSnapshot | null): boolean {
+    const availability = classifyQuotaAvailability(this.quotaResponse && { ...this.quotaResponse, rateLimits: limits });
+    const waitingReason = availability.status === "available" ? undefined : availability.reason;
+    if (waitingReason && waitingReason !== this.waitingReason) {
+      this.output.appendLine(`[quota-primer] enabled; waiting for available quota (${waitingReason})`);
+    }
+    this.waitingReason = waitingReason;
+    return availability.status === "available";
   }
 
   private scheduleNextTick(): void {
-    if (!this.enabled()) return;
+    if (!this.enabled() || this.disposed) return;
     if (this.timer) clearTimeout(this.timer);
     const seconds = Math.max(
       15,
@@ -1091,6 +1335,11 @@ export class QuotaPrimerController implements vscode.Disposable {
     }
 
     const state = this.state();
+    if ((this.waitingReason || this.lastSuppression) && !state.pendingConfirmation) {
+      this.statusBar.text = "$(clock) Codex Primer: Waiting";
+      this.statusBar.tooltip = `Enabled; ${this.waitingReason ? `waiting for available quota (${this.waitingReason})` : `deferred (${this.lastSuppression})`}; monitoring continues`;
+      return;
+    }
     if (state.pendingConfirmation) {
       this.statusBar.text = "$(sync) Codex Primer: Confirming";
       this.statusBar.tooltip = `Waiting for quota windows to advance after primer turn ${state.pendingConfirmation.turnId ?? ""}`;
@@ -1284,6 +1533,8 @@ async function startPrimerTurnAndWait(
   prompt: string,
   model: PrimerModelChoice,
   output: vscode.OutputChannel,
+  hooks: PrimerDispatchHooks,
+  beforeTurnId?: string,
 ): Promise<CodexTurn | undefined> {
   let completedNotification: CodexTurn | undefined;
   const onNotification = (method: string, params: unknown): void => {
@@ -1297,12 +1548,18 @@ async function startPrimerTurnAndWait(
   client.on("notification", onNotification);
 
   try {
+    await hooks.beforeDispatch(threadId, beforeTurnId);
+    await hooks.beforeStartTurn(threadId);
     const response = await client.request<TurnStartResponse>("turn/start", {
       threadId,
       input: [{ type: "text", text: prompt, text_elements: [] }],
       model: model.model,
       ...(model.effort ? { effort: model.effort } : {}),
     }, 30_000);
+    if (!response?.turn?.id) throw new Error("Primer turn/start returned no turn identity; keeping send intent pending");
+    await hooks.accepted(response.turn.id);
+    if (["completed", "failed"].includes(response.turn.status) ||
+        (response.turn.status === "interrupted" && response.turn.error)) return response.turn;
 
     let lastStatus: string | undefined;
     for (let attempt = 1; attempt <= 120; attempt += 1) {

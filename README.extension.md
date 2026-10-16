@@ -11,7 +11,13 @@ The two features use separate state and separate conversations.
 
 ## Auto Resume
 
-When a Codex task stops because a usage limit has been reached, Auto Resume remembers the exact work conversation and Codex's reported reset time. After quota becomes available again, it reopens that same conversation and sends the configured continuation prompt.
+When a work turn reports a structured quota error, Auto Resume remembers that exact turn and conversation. It independently reads account quota twice, at least 10 seconds apart, before reopening the same conversation and sending the configured continuation prompt. Confirmed quota recovery can resume work before the reported reset time, including an unexpected early account reset.
+
+The reported reset time is an expectation, not a required wait. Network errors, unknown quota state, and contradictory responses cancel availability confirmation while keeping the recovery target. An interrupted turn without a structured quota error, including a manual Stop, cannot become eligible just because the account is blocked.
+
+The continuation uses the official Codex UI owner and inherits the work conversation's model and reasoning settings. Before submitting, Auto Resume persists a dispatch record shared by windows on the same host. If acknowledgement is lost or the new turn is slow to appear, it keeps verifying that attempt without resending, including after a window reload. A definitive no-owner response leaves the task armed for a later confirmed retry.
+
+A resumed turn briefly marked `interrupted` without an error remains under verification. A completed turn disarms immediately; an in-progress turn must remain continuously stable for the configured stability interval.
 
 Enable it from the Command Palette:
 
@@ -36,6 +42,7 @@ Quota Window Primer watches the primary and secondary Codex quota reset times. A
 - it waits for a configurable grace period;
 - checks whether another real Codex request has already started the new window;
 - checks whether another Codex thread is currently active;
+- gives priority to Pending, Armed, or Verifying work recovery in any window sharing the same host storage;
 - checks for remaining account-level quota blockers;
 - performs a final randomized preflight check;
 - only then sends one tiny primer request.
@@ -48,7 +55,9 @@ Primer does not treat every future `resetAt` as proof that a new rolling window 
 - a **fixed** `resetAt` means a real Codex request has already started the new window, so Primer skips it;
 - an ambiguous sample is left pending until another observation is available.
 
-After sending a primer, the extension uses the same rule in reverse: the window is only confirmed as activated once `resetAt` stops moving.
+Automatic sends require fresh observations at least 15 seconds apart. This confirmation interval still applies when jitter is set to zero. After sending a primer, the window is only confirmed as activated once `resetAt` stops moving.
+
+When quota is blocked or unknown, work recovery has priority, or a previous send is unresolved, Primer pauses sending and continues monitoring quota boundaries. A request that fails because of transport uncertainty stays pending instead of being sent again blindly.
 
 ### Dedicated conversation
 
@@ -60,7 +69,7 @@ Codex Auto Resume - Quota Primer
 
 Future primer requests reuse that conversation instead of creating a new one.
 
-The Primer conversation is isolated from Auto Resume work-thread discovery.
+The current and historical Primer conversations are isolated from Auto Resume work-thread discovery. The extension retains up to 256 known Primer IDs and also recognizes trusted Primer metadata when the current ID is missing. A normal work conversation whose title merely contains “Primer” is still eligible.
 
 ### Low-cost model policy
 
@@ -88,11 +97,11 @@ Codex Auto Resume: Enable Quota Primer
 
 Primer is intentionally disabled by default.
 
-**Important:** Primer is account-wide in purpose but the extension state is local to one extension host. If you have both local VS Code and Remote SSH installed for the same Codex account, enable Quota Primer on only one of them.
+**Important:** For a single Codex account, enable automatic Primer in one designated Local or Remote environment only. If your important Auto Resume work runs on Remote SSH, prefer enabling Primer **on that same Remote extension host** and disabling automatic Primer on Windows Local: the Work-first priority journal cannot coordinate across Local/Remote hosts. Do not switch enable settings while a real continuation is pending or verifying.
 
 The setting is machine-scoped so local and Remote SSH instances can be configured independently.
 
-Multiple VS Code windows on the same machine can all observe this machine-scoped setting. Primer therefore uses an atomic same-host send lock in the extension's global storage so only one window can issue the automatic primer request for a boundary. This lock cannot coordinate different physical machines, so Local and Remote SSH should still have exactly one designated Primer owner.
+Windows sharing the extension's global storage on the same Local or Remote host coordinate work-recovery priority and Primer sends. Primer uses a short atomic send lock and a durable shared journal, so a second window sees pending attempts and already-handled boundaries even if its local state is stale. Coordination does not span different physical hosts or separate storage profiles.
 
 ### Test Primer immediately
 
@@ -102,7 +111,7 @@ Run:
 Codex Auto Resume: Prime Quota Now
 ```
 
-This sends one manual primer immediately and is the recommended smoke test for:
+This requests one manual primer, subject to quota, active-work, work-recovery priority, and unresolved-send guards. When those checks pass, it can be used to smoke-test:
 
 - first-time dedicated thread creation;
 - low-cost model selection;
@@ -110,7 +119,7 @@ This sends one manual primer immediately and is the recommended smoke test for:
 - later thread reuse;
 - local or Remote SSH transport compatibility.
 
-`Prime Quota Now` is a manual smoke test. It works even when automatic Primer is disabled, and it does **not** enable automatic priming. Run `Codex Auto Resume: Enable Quota Primer` separately when you are ready for reset-time automation.
+`Prime Quota Now` works even when automatic Primer is disabled and does **not** enable automatic priming. A blocked or unknown quota state, pending/armed/verifying work, an active thread, or an unresolved Primer attempt suppresses the request with a message. Run `Codex Auto Resume: Enable Quota Primer` separately when you are ready for reset-time automation.
 
 The dedicated Primer conversation is created in the workspace where the first primer is created so it can appear in that workspace's Codex conversation history. The stored thread is then reused globally by that extension host.
 
@@ -122,11 +131,13 @@ Run:
 Codex Auto Resume: Show Quota Primer Status
 ```
 
-To forget the dedicated primer conversation and force a new one on the next primer:
+To select a new dedicated conversation for the next permitted primer:
 
 ```text
 Codex Auto Resume: Reset Quota Primer Thread
 ```
+
+Reset preserves historical Primer identities and any unresolved send. It cannot bypass pending confirmation or make an old Primer conversation eligible for work recovery.
 
 ## Requirements
 
@@ -178,6 +189,10 @@ Open VS Code Settings and search for **Codex Auto Resume**, or edit Settings JSO
 }
 ```
 
+#### `resetGraceSeconds`
+
+Legacy allowance for the expected Auto Resume reset time. It is not a minimum wait: two independent available quota reads at least 10 seconds apart can resume an armed work conversation earlier. Primer has a separate `quotaPrimer.graceSeconds` setting.
+
 ### Quota Primer settings
 
 ```json
@@ -209,7 +224,7 @@ Delay after the tracked reset time before Primer decides the window is still dor
 
 #### `quotaPrimer.jitterSeconds`
 
-Adds a small randomized preflight delay. The extension rereads rate limits after this delay, which helps suppress duplicate primers when multiple VS Code windows are running.
+Adds a small randomized preflight delay. The extension rereads quota and work-recovery priority before sending. Automatic moving-window confirmation still requires observations at least 15 seconds apart when this value is zero.
 
 #### `quotaPrimer.modelPreference`
 
@@ -245,7 +260,7 @@ For Remote SSH projects, install the same VSIX on the remote host beside the rem
 
 Auto Resume is workspace-oriented and can be enabled independently in local and remote workspaces.
 
-On Remote SSH, version 0.3.9 first reads VS Code's **effective** `http.proxy` setting through the VS Code configuration API and passes that value to the spawned Codex app-server as HTTP/HTTPS proxy environment. The proxy value is never hard-coded, so changing Remote User Settings automatically changes the next spawned monitoring app-server.
+On Remote SSH, the extension reads VS Code's **effective** `http.proxy` setting through the VS Code configuration API and passes that value to the spawned Codex app-server as HTTP/HTTPS proxy environment. The 0.3.9 proxy-resolution chain and official UI IPC route are retained in 0.3.10. The proxy value is never hard-coded, so changing Remote User Settings changes the next spawned monitoring app-server.
 
 Network-source precedence is:
 
@@ -256,15 +271,19 @@ Network-source precedence is:
 
 The Linux sibling path remains a fallback for environments where the official Codex extension injects network settings that are not visible through the shared extension host. Proxy values are never logged, and authentication/token variables are never copied.
 
-Quota Primer should have a **single owner** for a Codex account. If the same account is used in both local and Remote SSH environments, enable Primer on only one extension host.
+Quota Primer should have a **single designated environment** for a Codex account. If the same account is used on both a Local host and a Remote SSH host, enable automatic Primer in only one of those environments. Same-host coordination does not provide a cross-machine lock.
 
 ## Safety behavior
 
 Auto Resume:
 
 - resumes only the persisted target work thread;
+- arms new targets only when the work turn has a structured quota error;
+- confirms quota availability through two independent reads before automatic submission;
 - does not send to an arbitrary visible conversation;
 - keeps a task armed if the correct Codex UI owner cannot be found;
+- preserves an ambiguous dispatch across windows and reloads without sending a duplicate;
+- inherits the work conversation's model and reasoning settings;
 - verifies the resumed turn before disarming.
 
 Quota Primer:
@@ -273,10 +292,19 @@ Quota Primer:
 - never intentionally primes a real work conversation;
 - skips priming when a new window has already started naturally;
 - skips while another Codex thread is active;
+- yields to pending, armed, or verifying work across the same host's windows;
+- keeps monitoring quota when sending is suppressed;
 - does not repeatedly create new conversations;
-- serializes automatic sends across multiple VS Code windows on the same host;
-- keeps an unresolved successful primer pending instead of repeatedly sending duplicate automatic primers;
+- serializes automatic and manual sends across windows sharing the same host storage;
+- persists uncertain sends before transport and waits for confirmation before another attempt;
+- retains historical Primer identities when its current conversation is reset;
 - uses a low-cost model preference and lowest supported reasoning effort;
 - refuses expensive model fallback by default;
 - does not bypass approval prompts;
 - uses a prompt that explicitly forbids file inspection, tools, and modifications.
+
+## v0.3.10 review status
+
+This version adds early quota-recovery confirmation, shared fail-closed quota decisions, work-first same-host coordination, durable dispatch tracking, and historical Primer isolation.
+
+Local VSIX installation/UI smoke and real Remote SSH proxy, reload, and recovery smoke remain outstanding during Code Review. Release follows review and validation. Roll back by reinstalling the 0.3.9 VSIX.
