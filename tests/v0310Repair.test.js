@@ -37,6 +37,7 @@ test("Disable during owner discovery cancels the known-unsent work continuation"
     attempted += 1;
     return true;
   };
+  await h.controller.ensureClient();
   await h.controller.tryAutomaticResume(h.state());
   assert.equal(attempted, 0);
   assert.equal(h.state(), undefined);
