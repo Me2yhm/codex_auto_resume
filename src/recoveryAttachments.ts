@@ -94,7 +94,8 @@ export async function materializePastedTxt(
   const root = codexAttachmentRoot(codexHomeOverride);
   const snapshots: PastedTxtSnapshot[] = [];
   try {
-    for (const ref of refs.references) {
+    for (let index = 0; index < refs.references.length; index += 1) {
+      const ref = refs.references[index];
       const fresh = await readOfficialPastedTxt(ref, refs.labels[index], root);
       const previousSnapshot = prior?.find(snapshot => snapshot.sourcePath === ref);
       if (prior && (!previousSnapshot || previousSnapshot.label !== fresh.label ||
