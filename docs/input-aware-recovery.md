@@ -97,6 +97,15 @@ Automated validation: [GitHub Actions #184](https://github.com/Me2yhm/codex_auto
 
 **Not yet verified live:** the new native attachment IPC payload has not yet been exercised in the user's Remote workspace after this patch. Deterministic tests verify the exact payload shape and fail-closed version gate, but do not prove the installed UI renders the attachment card or that the model reads the entire 40,224-byte plan. Keep PR #4 Draft until that live test passes.
 
+## Native TXT attachment transport follow-up (2026-10-18)
+
+The installed Remote official extension diagnostic identified the UI-only attachment field at `turnStart.context.attachments` for `openai.chatgpt 26.1007.21434` / `thread-follower-start-turn v2`. The implementation now preserves the exact original serialized input and supplies the existing pasted TXT file separately as `{label, path, fsPath, isPastedText: true}`. It does not append the TXT body, marker, or hash to the prompt. The payload is guarded by the exact inspected extension version/method combination; unknown versions fail closed and move the saved input to Review.
+
+The original file path, byte length, and SHA-256 remain pinned in workspace state. The file is rechecked before IPC; missing/changed/unsafe/unreadable/oversized attachments block the send. The code reuses the existing official-managed file and does not write the official registry or call unverified attachment-creation internals.
+
+Latest automated validation: [GitHub Actions #185](https://github.com/Me2yhm/codex_auto_resume/actions/runs/39137146542) PASS — `npm ci`, typecheck, **271/271 tests**, VSIX package and artifact upload. Artifact: `codex-auto-resume-vsix` (ID `12139852366`, SHA-256 `f3484c5cb5fa2dc04e71c73bfb89fab422f174da5eecae67adf2b1d7f62abef6`).
+
+**Live Remote confirmation remains required.** The report directly proves the context field and pasted-file metadata preparation, but the diagnostic did not fully expose the helper that normalizes attachments before assigning the official context array. Therefore deterministic tests prove the payload we construct, not yet that the installed UI renders it identically to the original paste. In a non-critical Remote test, verify the message body is unchanged, the TXT appears as a separate attachment, the model can read the full plan, and only one turn is created. Keep PR #4 Draft until this passes. High-confidence automatic replay remains unchanged and deferred.
 ## Required real-environment review
 
 Install only a review VSIX in a non-critical workspace initially. Keep `userOnlyPolicy=review`. Use `Inspect Recovery Input` for the three actual sample classes, verify original input completeness locally with `Review Recovery Input`, and confirm the official installed extension version. A real replay into the same conversation, new input during an Armed wait, reload persistence and a second quota exhaustion must be checked before broad release. Avoid manufacturing quota exhaustion or changing existing active task permissions.
