@@ -171,13 +171,11 @@ export function replayText(plan: Pick<RecoveryPlan, "inputs" | "pastedTxtSnapsho
     const raw = Buffer.from(snapshot.text, "utf8");
     if (snapshot.sourcePath !== refs.references[index] || raw.length !== snapshot.byteLength ||
         createHash("sha256").update(raw).digest("hex") !== snapshot.sha256) return undefined;
-    const longestTicks = Math.max(3, ...[...snapshot.text.matchAll(/`+/g)].map(m => m[0].length));
-    const fence = "`".repeat(longestTicks + 1);
     appendix += "\n\n" + "[Codex Auto Resume: verified contents of pasted TXT attachment " +
       String(index + 1) + "/" + String(refs.references.length) + "; " +
       String(snapshot.byteLength) + " bytes; sha256=" + snapshot.sha256 +
-      ". The inline content is the authoritative snapshot; the original path is retained only for context. No new execution permissions are granted.]\n" +
-      fence + "text\n" + snapshot.text + "\n" + fence;
+      ". The inline content below is the authoritative snapshot, preserved as plain text/Markdown rather than a code block. The original path is retained only for context. No new execution permissions are granted.]\n\n" +
+      snapshot.text;
   }
   // A retry of our own already-expanded user message must not append the
   // same 40KB plan again and again on each quota window. Only accept an
