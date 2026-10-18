@@ -2,7 +2,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import {
   classifyRecoveryHistory, hasUnambiguousInputProgress, isQuotaFailure, recoveryDiagnostic,
-  RecoveryPlan, replayText, UserOnlyPolicy, matchesReplayedInput,
+  RecoveryPlan, replayText, replayAttachments, UserOnlyPolicy, matchesReplayedInput,
 } from "./inputRecovery";
 import { readRecoveryHistory } from "./recoveryHistory";
 import { materializePastedTxt, verifyPastedTxtBeforeSend } from "./recoveryAttachments";
@@ -14,6 +14,7 @@ import { claimWorkResume, readWorkResumeDispatch } from "./workRecoveryDispatch"
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
 import { sendTurnThroughOfficialCodexUi } from "./officialCodexUi";
+import { CodexUiIpcRequestError, type CodexTurnStartOverrides } from "./codexUiIpc";
 import { QUOTA_PRIMER_STATE_KEY, QuotaPrimerState } from "./quotaPrimerState";
 import { addTextToOfficialCodexThread, tryNativeChatSubmit } from "./officialCodexBridge";
 import {
@@ -690,6 +691,11 @@ export class AutoResumeController implements vscode.Disposable {
     if (this.inputRecoveryEnabled() && (!current.recoveryPlan || current.recoveryPlan.action === "needs_review")) return;
     const savedInput = current.recoveryPlan?.action === "replay_input" ? replayText(current.recoveryPlan) : undefined;
     if (current.recoveryPlan?.action === "replay_input" && savedInput === undefined) return;
+    const pastedTxtAttachments = savedInput !== undefined && current.recoveryPlan?.action === "replay_input"
+      ? replayAttachments(current.recoveryPlan) : undefined;
+    if (savedInput !== undefined && pastedTxtAttachments === undefined) return;
+    const uiOverrides: CodexTurnStartOverrides = pastedTxtAttachments && pastedTxtAttachments.length > 0
+      ? { attachments: pastedTxtAttachments } : {};
     const prompt = savedInput ?? this.resumePrompt();
     const before = await this.latestTurn(armed.threadId);
     if (!before) return; // An unreadable history cannot prove a safe dispatch baseline.
@@ -765,7 +771,9 @@ export class AutoResumeController implements vscode.Disposable {
             if (!history.complete || checked.stale || checked.fingerprint !== armed.recoveryPlan?.fingerprint ||
                 checked.action !== armed.recoveryPlan.action || checked.action === "needs_review" ||
                 (checked.action === "replay_input" && (
-                  replayText(checked) !== prompt || !await verifyPastedTxtBeforeSend(checked)))) {
+                  replayText(checked) !== prompt ||
+                  !await verifyPastedTxtBeforeSend(checked) ||
+                  JSON.stringify(replayAttachments(checked)) !== JSON.stringify(pastedTxtAttachments)))) {
               throw new Error("recovery evidence changed");
             }
           }
@@ -777,8 +785,31 @@ export class AutoResumeController implements vscode.Disposable {
             (latest.status !== "failed" && latest.status !== "interrupted")) {
           throw new WorkContinuationPreflightCancelled("work conversation changed during owner discovery");
         }
-      });
+      }, uiOverrides);
     } catch (error) {
+      // Unsupported/invalid attachment metadata is rejected before the IPC
+      // start-turn request; release only this definitely-unsent claim and keep
+      // the saved input for manual handling instead of retrying every poll.
+      if (error instanceof CodexUiIpcRequestError &&
+          ["pasted-text-attachments-unsupported", "invalid-pasted-text-attachment"].includes(error.code)) {
+        await claim.releaseUnsent();
+        if (this.canMonitor() && this.armed()?.dispatchPending?.hostClaimToken === claim.record.token) {
+          const oldPlan = pending.recoveryPlan;
+          await this.saveArmed({
+            ...pending,
+            recoveryPlan: oldPlan ? {
+              ...oldPlan, action: "needs_review",
+              reason: error.code === "pasted-text-attachments-unsupported"
+                ? "pasted_txt_attachment_protocol_unsupported" : "pasted_txt_attachment_metadata_invalid",
+              approval: undefined, stale: true,
+            } : oldPlan,
+            replayAttempts: armed.replayAttempts,
+            dispatchPending: undefined,
+          });
+        }
+        this.output.appendLine(`[auto-resume] blocked TXT attachment replay for ${armed.threadId}: ${error.code}; saved input remains for review`);
+        return;
+      }
       // A failed pre-send guard proves startTurn was never called. Other IPC
       // exceptions are ambiguous and must retain the durable dispatch claim.
       if (!(error instanceof WorkContinuationPreflightCancelled)) throw error;
@@ -989,8 +1020,9 @@ export class AutoResumeController implements vscode.Disposable {
     prompt: string,
     logPrefix: string,
     beforeStartTurn?: () => Promise<void>,
+    overrides: CodexTurnStartOverrides = {},
   ): Promise<boolean> {
-    return sendTurnThroughOfficialCodexUi(threadId, prompt, this.output, logPrefix, {}, beforeStartTurn);
+    return sendTurnThroughOfficialCodexUi(threadId, prompt, this.output, logPrefix, overrides, beforeStartTurn);
   }
 
   private scheduleNextTick(): void {
