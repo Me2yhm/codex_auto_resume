@@ -7,7 +7,7 @@ Codex Auto Resume is a companion extension for the official OpenAI Codex VS Code
 This build adds a recovery-content decision to the existing Auto Resume flow. It is not a new task queue or an independent writer for work conversations.
 
 - **Continue:** complete history shows one unambiguous user input followed by substantive agent output or recorded tool activity; resume existing work with the configured continuation.
-- **Replay input:** resend the exact saved plain-text prompt or selection-generated question/answer after quota recovery, without appending the generic continuation. When the original plain text includes a verified official pasted TXT reference, the original message is preserved and the pinned TXT body is appended verbatim.
+- **Replay input:** resend the exact saved plain-text prompt or selection-generated question/answer after quota recovery, without appending the generic continuation. When the original plain text includes a verified official pasted TXT reference, the original message is preserved and the pinned TXT body is appended verbatim as ordinary text/Markdown, **not wrapped in an outer code block**. Any code fences that are part of the TXT file itself remain unchanged.
 - **Review input:** retain the target and supported input snapshot, but send nothing when the evidence is incomplete, ambiguous, unsupported or contains multiple unresolved inputs.
 
 **Conservative default:** a full failed turn containing only a user message is a replay candidate, not proof that execution never began. The default `review` policy asks you to decide for that exact input. Empty assistant/reasoning placeholders and `inProgress` lifecycle status alone are not treated as executed work.
