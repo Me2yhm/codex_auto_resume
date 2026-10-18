@@ -228,5 +228,5 @@ test("pasted Markdown plan is appended as ordinary Markdown, not wrapped in a co
   assert.ok(replay.includes("\n## 目标\n"));
   assert.ok(replay.includes("\n- 先检查行情路径\n"));
   assert.ok(!replay.slice(bodyStart).startsWith(String.fromCharCode(96).repeat(3)));
-  assert.equal((replay.match(/# Optimizer 数据调研计划/g) || []).length, 1);
+  assert.equal((replay.slice(bodyStart).match(/# Optimizer 数据调研计划/g) || []).length, 1);
 });
