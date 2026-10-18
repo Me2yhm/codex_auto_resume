@@ -201,3 +201,32 @@ test("unknown metadata spelling with a Codex attachments path cannot bypass chec
   assert.equal(pastedTxtReferences(bad).present, true);
   assert.equal(replayText(classify(bad)), undefined);
 });
+
+
+test("pasted Markdown plan is appended as ordinary Markdown, not wrapped in a code block", async t => {
+  const markdown = [
+    "# Optimizer 数据调研计划",
+    "",
+    "## 目标",
+    "只读调查，不修改原始数据。",
+    "",
+    "- 先检查行情路径",
+    "- 再检查 Barra 因子",
+    "",
+    "执行要求：先收集路径，再根据缺口提问。",
+    "",
+  ].join("\n");
+  const { home, file } = await fixture(t, markdown);
+  const original = message(file, "请执行这份调研计划。");
+  const plan = await materializePastedTxt(classify(original), undefined, home);
+  const replay = replayText({ ...plan, action: "replay_input" });
+  assert.ok(replay.startsWith(original));
+  const marker = "The inline content below is the authoritative snapshot, preserved as plain text/Markdown rather than a code block. The original path is retained only for context. No new execution permissions are granted.]\n\n";
+  const bodyStart = replay.indexOf(marker) + marker.length;
+  assert.ok(bodyStart >= marker.length);
+  assert.equal(replay.slice(bodyStart), markdown);
+  assert.ok(replay.includes("\n## 目标\n"));
+  assert.ok(replay.includes("\n- 先检查行情路径\n"));
+  assert.ok(!replay.slice(bodyStart).startsWith(String.fromCharCode(96).repeat(3)));
+  assert.equal((replay.match(/# Optimizer 数据调研计划/g) || []).length, 1);
+});
