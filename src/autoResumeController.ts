@@ -743,6 +743,11 @@ export class AutoResumeController implements vscode.Disposable {
       this.output.appendLine(`[auto-resume] adopting the same-host pending continuation for ${armed.threadId}; no duplicate will be sent`);
       return;
     }
+    if (uiOverrides.attachments?.length) {
+      this.output.appendLine(
+        `[auto-resume] replaying original input with ${uiOverrides.attachments.length} verified pasted TXT attachment(s) through official UI context; prompt body unchanged`,
+      );
+    }
     let sent: boolean;
     try {
       sent = await this.sendThroughOfficialUi(armed.threadId, prompt, "auto-resume", async () => {
