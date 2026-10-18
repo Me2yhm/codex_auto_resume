@@ -81,6 +81,22 @@ A native/manual continuation already visible on the same thread prevents an addi
 
 The original 76 added tests cover source-specific classification, empty placeholders, history bounds, late answers while Armed/Verifying, same-turn steering, multiple inputs, structured payload retention, exact plain-text replay, explicit review, source edits during dialogs/owner discovery, quota failure during confirmation, lifecycle cancellation, repeated exhaustion, bounded retries, native continuation, replay lineage, reloads, secret-free diagnostics and completed Disarm. Original regression fixtures explicitly select legacy mode because they contain summary-only turn data; the new controller tests enable input-aware mode and exercise the real final-send guard. Additional TXT tests cover 40KB+ plans, digest pinning, missing/modified files, unsafe paths, symlinks, invalid encodings, payload size limits, multiple references, repeat quota rejection, saved-state reload and content changes during owner discovery.
 
+## Native pasted-TXT attachment transport (2026-10-18)
+
+The Remote-host diagnostic of the installed `openai.chatgpt 26.1007.21434` bundle established that `thread-follower-start-turn v2` carries the original turn request separately from UI-only `turnStart.context.attachments`. The official pasted-TXT object observed in this bundle contains `label`, `path`, `fsPath`, and `isPastedText: true`. This is a **version-specific internal UI IPC contract**, not a public App Server schema.
+
+The current implementation now:
+- Leaves the stored serialized user input unchanged; it no longer appends TXT body, integrity markers, or code fences to the prompt.
+- Reuses the already existing official managed TXT path and sends the separate attachment metadata through `turnStart.context.attachments`.
+- Preserves the source TXT snapshot/hash in workspace state, checks UTF-8, size and source confinement, and revalidates the file immediately before owner IPC dispatch.
+- Refuses attachment sends unless the installed official extension is exactly `26.1007.21434` and `thread-follower-start-turn` is v2. Unsupported versions preserve the saved input and transition to review; they do not silently fall back to inline text.
+- Does not create a new official attachment, write the official registry, modify the official bundle, or alter the user input. It assumes the referenced file is the existing managed attachment originally created by Codex.
+- Keeps `userOnlyPolicy=review`; the separately requested high-confidence automatic replay policy has not changed.
+
+Automated validation: [GitHub Actions #184](https://github.com/Me2yhm/codex_auto_resume/actions/runs/39137048037) PASS — `npm ci`, `npm run check`, **271/271 tests**, VSIX packaging and artifact upload. The uploaded artifact is `codex-auto-resume-vsix` (artifact ID `12139573822`, SHA-256 `0c0f850cda49d7d255da63f815a18b229eb8a6c6362818047507f07c43136d93`).
+
+**Not yet verified live:** the new native attachment IPC payload has not yet been exercised in the user's Remote workspace after this patch. Deterministic tests verify the exact payload shape and fail-closed version gate, but do not prove the installed UI renders the attachment card or that the model reads the entire 40,224-byte plan. Keep PR #4 Draft until that live test passes.
+
 ## Required real-environment review
 
 Install only a review VSIX in a non-critical workspace initially. Keep `userOnlyPolicy=review`. Use `Inspect Recovery Input` for the three actual sample classes, verify original input completeness locally with `Review Recovery Input`, and confirm the official installed extension version. A real replay into the same conversation, new input during an Armed wait, reload persistence and a second quota exhaustion must be checked before broad release. Avoid manufacturing quota exhaustion or changing existing active task permissions.
