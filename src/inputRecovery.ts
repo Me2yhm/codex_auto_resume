@@ -15,10 +15,18 @@ export interface SavedRecoveryInput {
 
 /** Snapshot of text that the official IDE persisted only as a TXT path. */
 export interface PastedTxtSnapshot {
+  /** Display label serialized by the official pasted-TXT prompt helper. */
+  label: string;
   sourcePath: string;
   sha256: string;
   byteLength: number;
   text: string;
+}
+export interface PastedTxtUiAttachment {
+  label: string;
+  path: string;
+  fsPath: string;
+  isPastedText: true;
 }
 export interface AttachmentIntegrity {
   status: "verified" | "unverified" | "missing" | "modified" | "unsafe_reference" |
@@ -119,91 +127,125 @@ export function originalReplayText(plan: Pick<RecoveryPlan, "inputs">): string |
   return part.text;
 }
 
-export type PastedTxtReferences = { present: false; references: [] } |
-  { present: true; references: string[]; error?: "invalid_reference" };
+export type PastedTxtReferences = { present: false; references: []; labels: [] } |
+  { present: true; references: string[]; labels: string[]; error?: "invalid_reference" };
 
 /** Recognize only the official "Files pasted by the user" metadata block.
- * Never guess at arbitrary filesystem paths elsewhere in a user's prompt. */
+ * The label is JSON-quoted in the installed Codex serializer; do not infer
+ * labels from filenames or arbitrary paths outside this block. */
 export function pastedTxtReferences(text: string): PastedTxtReferences {
   const header = /^# Files pasted by the user:\s*$/gmi;
   const headers = [...text.matchAll(header)];
   if (headers.length === 0) {
-    // Unknown Codex attachment formatting must never be replayed as a bare
-    // path without validated bytes. Detection is only a negative safety gate;
-    // we do not open or infer arbitrary paths outside the recognized block.
     return /[\\/]\.codex[\\/]attachments[\\/]/i.test(text)
-      ? { present: true, references: [], error: "invalid_reference" }
-      : { present: false, references: [] };
+      ? { present: true, references: [], labels: [], error: "invalid_reference" }
+      : { present: false, references: [], labels: [] };
   }
-  if (headers.length !== 1) return { present: true, references: [], error: "invalid_reference" };
+  if (headers.length !== 1 || text.includes("[Codex Auto Resume: verified contents of pasted TXT attachment ")) {
+    return { present: true, references: [], labels: [], error: "invalid_reference" };
+  }
   const block = text.slice(headers[0].index! + headers[0][0].length).split(/\r?\n/);
   const references: string[] = [];
+  const labels: string[] = [];
   let closed = false;
   for (const line of block) {
     if (/^## My request:\s*$/i.test(line)) { closed = true; break; }
     if (!line.trim()) continue;
-    const matched = /^##\s+.*:\s+(.+?)\s*$/.exec(line);
-    if (!matched || !/\.txt$/i.test(matched[1])) {
-      return { present: true, references: [], error: "invalid_reference" };
+    const matched = /^##\s+("(?:\\.|[^"\\])*"):\s+(.+?)\s*$/.exec(line);
+    if (!matched || !/\.txt$/i.test(matched[2])) {
+      return { present: true, references: [], labels: [], error: "invalid_reference" };
     }
-    references.push(matched[1]);
+    let label: unknown;
+    try { label = JSON.parse(matched[1]); } catch {
+      return { present: true, references: [], labels: [], error: "invalid_reference" };
+    }
+    if (typeof label !== "string" || !label.trim()) {
+      return { present: true, references: [], labels: [], error: "invalid_reference" };
+    }
+    references.push(matched[2]);
+    labels.push(label);
   }
   if (!closed || references.length === 0 || references.length > 4 ||
       new Set(references).size !== references.length) {
-    return { present: true, references: [], error: "invalid_reference" };
+    return { present: true, references: [], labels: [], error: "invalid_reference" };
   }
-  return { present: true, references };
+  return { present: true, references, labels };
 }
 
-/** The writer accepts text only: replay the ORIGINAL message together with the
- * pinned, byte-verified TXT bodies, never a naked path that can go missing.
- * Non-TXT inputs retain the original verbatim replay contract. */
+function verifiedPastedTxtSnapshots(
+  plan: Pick<RecoveryPlan, "pastedTxtSnapshots" | "attachmentIntegrity">,
+  original: string,
+  refs: Extract<PastedTxtReferences, { present: true }>,
+): PastedTxtSnapshot[] | undefined {
+  if (refs.error || plan.attachmentIntegrity?.status !== "verified" ||
+      !plan.pastedTxtSnapshots || plan.pastedTxtSnapshots.length !== refs.references.length) return undefined;
+  const snapshots = plan.pastedTxtSnapshots;
+  let totalBytes = Buffer.byteLength(original, "utf8");
+  for (let index = 0; index < refs.references.length; index += 1) {
+    const snapshot = snapshots[index];
+    const raw = Buffer.from(snapshot.text, "utf8");
+    if (snapshot.sourcePath !== refs.references[index] || snapshot.label !== refs.labels[index] ||
+        raw.length !== snapshot.byteLength ||
+        createHash("sha256").update(raw).digest("hex") !== snapshot.sha256) return undefined;
+    totalBytes += snapshot.byteLength;
+  }
+  return totalBytes <= MAX_INPUT_BYTES ? snapshots : undefined;
+}
+
+/** The request body remains the exact original serialized input. TXT is sent
+ * separately as official UI context.attachments, never appended to the body. */
 export function replayText(plan: Pick<RecoveryPlan, "inputs" | "pastedTxtSnapshots" | "attachmentIntegrity">): string | undefined {
   const original = originalReplayText(plan);
   if (original === undefined) return undefined;
   const refs = pastedTxtReferences(original);
   if (!refs.present) return original;
-  if (refs.error || plan.attachmentIntegrity?.status !== "verified" ||
-      !plan.pastedTxtSnapshots || plan.pastedTxtSnapshots.length !== refs.references.length) return undefined;
-  let appendix = "";
-  for (let index = 0; index < refs.references.length; index += 1) {
-    const snapshot = plan.pastedTxtSnapshots[index];
-    const raw = Buffer.from(snapshot.text, "utf8");
-    if (snapshot.sourcePath !== refs.references[index] || raw.length !== snapshot.byteLength ||
-        createHash("sha256").update(raw).digest("hex") !== snapshot.sha256) return undefined;
-    appendix += "\n\n" + "[Codex Auto Resume: verified contents of pasted TXT attachment " +
-      String(index + 1) + "/" + String(refs.references.length) + "; " +
-      String(snapshot.byteLength) + " bytes; sha256=" + snapshot.sha256 +
-      ". The inline content below is the authoritative snapshot, preserved as plain text/Markdown rather than a code block. The original path is retained only for context. No new execution permissions are granted.]\n\n" +
-      snapshot.text;
-  }
-  // A retry of our own already-expanded user message must not append the
-  // same 40KB plan again and again on each quota window. Only accept an
-  // existing appendix if it exactly matches these pinned attachment bytes.
-  const ownMarker = "[Codex Auto Resume: verified contents of pasted TXT attachment ";
-  const delivered = original.includes(ownMarker)
-    ? (original.endsWith(appendix) ? original : undefined)
-    : original + appendix;
-  return delivered && Buffer.byteLength(delivered, "utf8") <= MAX_INPUT_BYTES ? delivered : undefined;
+  return verifiedPastedTxtSnapshots(plan, original, refs) ? original : undefined;
+}
+
+/** Reconstruct the UI-only attachment metadata observed in openai.chatgpt
+ * 26.1007.21434. This is an internal, version-gated IPC contract, not an
+ * App Server turn/start field. Paths refer to existing official managed files. */
+export function replayAttachments(
+  plan: Pick<RecoveryPlan, "inputs" | "pastedTxtSnapshots" | "attachmentIntegrity">,
+): PastedTxtUiAttachment[] | undefined {
+  const original = originalReplayText(plan);
+  if (original === undefined) return undefined;
+  const refs = pastedTxtReferences(original);
+  if (!refs.present) return [];
+  const snapshots = verifiedPastedTxtSnapshots(plan, original, refs);
+  if (!snapshots) return undefined;
+  return snapshots.map(snapshot => ({
+    label: snapshot.label,
+    path: snapshot.sourcePath,
+    fsPath: snapshot.sourcePath,
+    isPastedText: true,
+  }));
 }
 
 /** Input equality alone is not delivery proof; used only after this controller
  * already recorded an accepted dispatch, to avoid assigning its lineage to a
- * different newer user message. Unknown payloads never receive that lineage. */
+ * different newer user message. */
 export function matchesReplayedInput(turn: CodexTurn, plan: RecoveryPlan): boolean {
   if (turn.itemsView !== "full" || !Array.isArray(turn.items)) return false;
   const users = turn.items.filter(item => record(item) && item.type === "userMessage");
   if (users.length !== 1 || !record(users[0]) || plan.inputs.length !== 1) return false;
   const originalMatch = canonical(users[0].content) === canonical(plan.inputs[0].content);
-  if (originalMatch && !pastedTxtReferences(originalReplayText(plan) ?? "").present) return true;
-  // A replay with pinned TXT bodies intentionally differs from the original
-  // userMessage. Match ONLY after our durable accepted-dispatch lineage exists.
-  const fullReplay = replayText(plan);
-  if (fullReplay === undefined || !Array.isArray(users[0].content) || users[0].content.length !== 1 ||
-      !record(users[0].content[0])) return false;
-  const part = users[0].content[0];
-  return part.type === "text" && part.text === fullReplay &&
-    Array.isArray(part.text_elements) && part.text_elements.length === 0;
+  if (!originalMatch) return false;
+  const original = originalReplayText(plan) ?? "";
+  const refs = pastedTxtReferences(original);
+  if (!refs.present) return true;
+  const expected = replayAttachments(plan);
+  if (!expected) return false;
+  // The durable accepted-dispatch claim proves our sender passed this context.
+  // Some App Server history versions omit UI-only attachment metadata; if it
+  // is present, it must match the exact pinned manifest.
+  if (users[0].attachments === undefined || users[0].attachments === null) return true;
+  if (!Array.isArray(users[0].attachments)) return false;
+  const actual = users[0].attachments.map(value => {
+    if (!record(value)) return null;
+    return { label: value.label, path: value.path, fsPath: value.fsPath, isPastedText: value.isPastedText };
+  });
+  return canonical(actual) === canonical(expected);
 }
 
 function waitingOnQuestion(items: unknown[]): boolean {
