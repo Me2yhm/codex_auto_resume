@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { classifyRecoveryHistory, replayText, pastedTxtReferences, matchesReplayedInput,
+const { classifyRecoveryHistory, replayText, replayAttachments, pastedTxtReferences, matchesReplayedInput,
   recoveryDiagnostic, MAX_INPUT_BYTES } = require("../dist/inputRecovery");
 const { materializePastedTxt, verifyPastedTxtBeforeSend,
   MAX_PASTED_TXT_BYTES } = require("../dist/recoveryAttachments");
@@ -32,7 +32,7 @@ const classify = text => classifyRecoveryHistory({ complete: true, turns: [{
     content: [{ type: "text", text, text_elements: [] }] }],
 }] }, { nowMs: NOW });
 
-test("real Codex-style pasted TXT reference is captured, SHA-pinned and expanded verbatim", async t => {
+test("real Codex-style pasted TXT keeps original body and yields a separate official UI attachment", async t => {
   const originalContent = "计划第一步：只读调查\n" + "数据不可修改\n".repeat(3000);
   const { home, file } = await fixture(t, originalContent);
   const original = message(file, "Read-only and CTP separately authorized.");
@@ -45,9 +45,12 @@ test("real Codex-style pasted TXT reference is captured, SHA-pinned and expanded
   assert.equal(captured.pastedTxtSnapshots[0].byteLength, Buffer.byteLength(originalContent));
   assert.equal(captured.pastedTxtSnapshots[0].text, originalContent);
   const dispatchedText = replayText(captured);
-  assert.ok(dispatchedText.startsWith(original));
-  assert.ok(dispatchedText.includes(originalContent));
-  assert.ok(dispatchedText.includes(digest));
+  assert.equal(dispatchedText, original);
+  assert.ok(!dispatchedText.includes(originalContent));
+  assert.deepEqual(replayAttachments(captured), [{
+    label: "# Optimizer 数据调研计划——本机 Codex 执行版…",
+    path: file, fsPath: file, isPastedText: true,
+  }]);
   assert.equal(await verifyPastedTxtBeforeSend({ ...captured, action: "replay_input" }, home), true);
   const diagnostics = JSON.stringify(recoveryDiagnostic(captured));
   assert.ok(!diagnostics.includes(file));
@@ -151,25 +154,33 @@ test("pasted TXT expansion obeys total maximum IPC message budget", async t => {
   assert.equal(replayText(p), undefined);
 });
 
-test("multiple pasted TXT references expand in original order without truncation", async t => {
+test("multiple pasted TXT references preserve original body and attachment order", async t => {
   const { home, file, folder } = await fixture(t, "FIRST CONTENT");
   const second = path.join(folder, "Second plan.txt");
   await fs.writeFile(second, "SECOND CONTENT");
   const src = message(file).replace("\n\n## My request:", "\n## \"second\": " + second + "\n\n## My request:");
   const p = await materializePastedTxt(classify(src), undefined, home);
   const dispatched = replayText(p);
+  assert.equal(dispatched, src);
   assert.equal(p.attachmentIntegrity.count, 2);
-  assert.ok(dispatched.indexOf("FIRST CONTENT") < dispatched.indexOf("SECOND CONTENT"));
+  assert.deepEqual(replayAttachments(p).map(item => item.path), [file, second]);
+  assert.ok(!dispatched.includes("FIRST CONTENT"));
+  assert.ok(!dispatched.includes("SECOND CONTENT"));
 });
 
-test("own replay lineage recognizes expanded TXT only after accepted dispatch", async t => {
+test("own replay lineage recognizes original text plus separately attached TXT after accepted dispatch", async t => {
   const { home, file } = await fixture(t, "work requirements");
   const pinned = await materializePastedTxt(classify(message(file)), undefined, home);
   const actual = replayText(pinned);
   const observed = { itemsView: "full", items: [{ type: "userMessage",
-    content: [{ type: "text", text: actual, text_elements: [] }] }] };
+    content: [{ type: "text", text: actual, text_elements: [] }],
+    attachments: replayAttachments(pinned),
+  }] };
   assert.equal(matchesReplayedInput(observed, pinned), true);
   observed.items[0].content[0].text = actual + "changed";
+  assert.equal(matchesReplayedInput(observed, pinned), false);
+  observed.items[0].content[0].text = actual;
+  observed.items[0].attachments[0].path += ".changed";
   assert.equal(matchesReplayedInput(observed, pinned), false);
 });
 
@@ -181,17 +192,18 @@ test("ordinary no-attachment inputs still replay byte-for-byte and need no files
 });
 
 
-test("replaying an already expanded TXT never appends the plan again", async t => {
+test("repeated quota rejection reuses the same TXT metadata without inlining or duplication", async t => {
   const { home, file } = await fixture(t, "READ-ONLY SESSION PLAN");
-  const first = await materializePastedTxt(classify(message(file)), undefined, home);
-  const expanded = replayText(first);
-  const second = await materializePastedTxt(classify(expanded), undefined, home);
+  const original = message(file);
+  const first = await materializePastedTxt(classify(original), undefined, home);
+  const second = await materializePastedTxt(classify(replayText(first)), first, home);
   assert.equal(second.attachmentIntegrity.status, "verified");
-  assert.equal(replayText(second), expanded);
-  assert.equal((replayText(second).match(/READ-ONLY SESSION PLAN/g) || []).length, 1);
+  assert.equal(replayText(second), original);
+  assert.deepEqual(replayAttachments(second), replayAttachments(first));
+  assert.ok(!replayText(second).includes("READ-ONLY SESSION PLAN"));
   await fs.writeFile(file, "DIFFERENT PLAN");
-  const changed = await materializePastedTxt(classify(expanded), undefined, home);
-  assert.equal(changed.reason, "attachment_invalid_reference");
+  const changed = await materializePastedTxt(classify(original), first, home);
+  assert.equal(changed.reason, "attachment_modified");
   assert.equal(replayText(changed), undefined);
 });
 
@@ -203,7 +215,7 @@ test("unknown metadata spelling with a Codex attachments path cannot bypass chec
 });
 
 
-test("pasted Markdown plan is appended as ordinary Markdown, not wrapped in a code block", async t => {
+test("pasted Markdown stays a separate attachment and the original prompt remains unchanged", async t => {
   const markdown = [
     "# Optimizer 数据调研计划",
     "",
@@ -220,13 +232,11 @@ test("pasted Markdown plan is appended as ordinary Markdown, not wrapped in a co
   const original = message(file, "请执行这份调研计划。");
   const plan = await materializePastedTxt(classify(original), undefined, home);
   const replay = replayText({ ...plan, action: "replay_input" });
-  assert.ok(replay.startsWith(original));
-  const marker = "The inline content below is the authoritative snapshot, preserved as plain text/Markdown rather than a code block. The original path is retained only for context. No new execution permissions are granted.]\n\n";
-  const bodyStart = replay.indexOf(marker) + marker.length;
-  assert.ok(bodyStart >= marker.length);
-  assert.equal(replay.slice(bodyStart), markdown);
-  assert.ok(replay.includes("\n## 目标\n"));
-  assert.ok(replay.includes("\n- 先检查行情路径\n"));
-  assert.ok(!replay.slice(bodyStart).startsWith(String.fromCharCode(96).repeat(3)));
-  assert.equal((replay.slice(bodyStart).match(/# Optimizer 数据调研计划/g) || []).length, 1);
+  assert.equal(replay, original);
+  assert.deepEqual(replayAttachments(plan), [{
+    label: "# Optimizer 数据调研计划——本机 Codex 执行版…",
+    path: file, fsPath: file, isPastedText: true,
+  }]);
+  assert.ok(!replay.includes(markdown));
+  assert.ok(!replay.includes("verified contents of pasted TXT attachment"));
 });
