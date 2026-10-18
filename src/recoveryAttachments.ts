@@ -26,7 +26,7 @@ function codexAttachmentRoot(override?: string): string {
 }
 
 /** Prevent absolute-file and symlink escapes even if the input is malicious. */
-async function readOfficialPastedTxt(sourcePath: string, root: string): Promise<PastedTxtSnapshot> {
+async function readOfficialPastedTxt(sourcePath: string, label: string, root: string): Promise<PastedTxtSnapshot> {
   if (!path.isAbsolute(sourcePath) || path.resolve(sourcePath) !== sourcePath) {
     throw new AttachmentReadError("unsafe_reference");
   }
@@ -58,7 +58,7 @@ async function readOfficialPastedTxt(sourcePath: string, root: string): Promise<
     }
     const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
     if (!text || text.includes("\u0000")) throw new AttachmentReadError("unsupported_encoding");
-    return { sourcePath, sha256: sha256(bytes), byteLength: bytes.length, text };
+    return { label, sourcePath, sha256: sha256(bytes), byteLength: bytes.length, text };
   } catch (error) {
     if (error instanceof AttachmentReadError) throw error;
     if (error instanceof TypeError) throw new AttachmentReadError("unsupported_encoding");
@@ -95,9 +95,10 @@ export async function materializePastedTxt(
   const snapshots: PastedTxtSnapshot[] = [];
   try {
     for (const ref of refs.references) {
-      const fresh = await readOfficialPastedTxt(ref, root);
+      const fresh = await readOfficialPastedTxt(ref, refs.labels[index], root);
       const previousSnapshot = prior?.find(snapshot => snapshot.sourcePath === ref);
-      if (prior && (!previousSnapshot || previousSnapshot.sha256 !== fresh.sha256 ||
+      if (prior && (!previousSnapshot || previousSnapshot.label !== fresh.label ||
+          previousSnapshot.sha256 !== fresh.sha256 ||
           previousSnapshot.byteLength !== fresh.byteLength ||
           sha256(Buffer.from(previousSnapshot.text, "utf8")) !== previousSnapshot.sha256)) {
         throw new AttachmentReadError("modified");
@@ -112,12 +113,9 @@ export async function materializePastedTxt(
     attachmentIntegrity: { status: "verified", count: snapshots.length,
       bytes: snapshots.reduce((sum, item) => sum + item.byteLength, 0) },
   };
-  // Maximum payload includes the original message, delimiters and attachment
-  // bodies; never send or claim that an oversized message was fully replayed.
-  if (replayText(attached) === undefined) {
-    const marker = "[Codex Auto Resume: verified contents of pasted TXT attachment ";
-    return status(original.includes(marker) ? "invalid_reference" : "too_large", snapshots);
-  }
+  // The request body and attachment payload remain separate, but the combined
+  // original text plus pinned files still obeys the same safety size budget.
+  if (replayText(attached) === undefined) return status("too_large", snapshots);
   return attached;
 }
 
@@ -129,7 +127,12 @@ export async function verifyPastedTxtBeforeSend(plan: RecoveryPlan, codexHomeOve
   // bypass the file read and final guard.
   if (plan.candidate !== "replay_input") return false;
   const validated = await materializePastedTxt(plan, plan, codexHomeOverride);
-  return validated.attachmentIntegrity?.status !== "verified"
-    ? !pastedTxtReferences(originalReplayText(plan) ?? "").present
-    : replayText(validated) === replayText(plan);
+  if (validated.attachmentIntegrity?.status !== "verified") {
+    return !pastedTxtReferences(originalReplayText(plan) ?? "").present;
+  }
+  const before = replayText(plan);
+  const after = replayText(validated);
+  if (before === undefined || after !== before) return false;
+  const { replayAttachments } = await import("./inputRecovery");
+  return JSON.stringify(replayAttachments(validated)) === JSON.stringify(replayAttachments(plan));
 }
