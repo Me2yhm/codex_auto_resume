@@ -31,7 +31,7 @@ function setup(t, options = {}) {
     mocks: { './officialCodexUi': { async sendTurnThroughOfficialCodexUi(threadId, prompt, output, prefix, overrides, guard) {
       await options.onDiscovery?.(h);
       await guard?.();
-      sent.push({ threadId, prompt, prefix });
+      sent.push({ threadId, prompt, prefix, overrides });
       if (options.ambiguous) throw new Error('acknowledgement lost');
       return options.sent !== false;
     } } },
@@ -359,7 +359,7 @@ test('disabling the input-aware setting cannot bypass an already saved review', 
 });
 
 
-test('the real TXT-backed prompt is snapshotted and expanded after an explicit review', async t => {
+test('the real TXT-backed prompt replays the original body with separate attachment metadata after review', async t => {
   const fs = require('node:fs/promises');
   const os = require('node:os');
   const path = require('node:path');
@@ -392,9 +392,12 @@ test('the real TXT-backed prompt is snapshotted and expanded after an explicit r
   h.setQuota(quota()); h.advance(); await h.tick(); h.advance(); await h.tick();
   assert.equal(h.sent.length, 1);
   assert.equal(h.sent[0].threadId, THREAD);
-  assert.ok(h.sent[0].prompt.startsWith(original));
-  assert.ok(h.sent[0].prompt.includes(plan));
-  assert.ok(h.sent[0].prompt.includes('sha256='));
+  assert.equal(h.sent[0].prompt, original);
+  assert.ok(!h.sent[0].prompt.includes(plan));
+  assert.deepEqual(h.sent[0].overrides.attachments, [{
+    label: "Optimizer 调研计划",
+    path: file, fsPath: file, isPastedText: true,
+  }]);
   assert.equal(h.state().replayAttempts, 1);
 });
 
