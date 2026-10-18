@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import { TextDecoder } from "util";
 import {
-  MAX_INPUT_BYTES, originalReplayText, pastedTxtReferences, replayText,
+  MAX_INPUT_BYTES, originalReplayText, pastedTxtReferences, replayText, replayAttachments,
   type AttachmentIntegrity, type PastedTxtSnapshot, type RecoveryPlan,
 } from "./inputRecovery";
 
@@ -133,6 +133,5 @@ export async function verifyPastedTxtBeforeSend(plan: RecoveryPlan, codexHomeOve
   const before = replayText(plan);
   const after = replayText(validated);
   if (before === undefined || after !== before) return false;
-  const { replayAttachments } = await import("./inputRecovery");
   return JSON.stringify(replayAttachments(validated)) === JSON.stringify(replayAttachments(plan));
 }
