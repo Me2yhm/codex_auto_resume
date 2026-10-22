@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import type { CodexTurn } from "./types";
+import { answeredQuestionFollowedByWork } from "./answeredQuestionRecovery";
 
 export type RecoveryAction = "continue" | "replay_input" | "needs_review";
 export type UserOnlyPolicy = "review" | "replayStableUserOnly";
@@ -310,8 +311,16 @@ export function classifyRecoveryHistory(
   if (invalid) return { ...plan, reason: "items_not_full_or_malformed" };
   if (!isQuotaFailure(latest)) return { ...plan, reason: "latest_turn_not_quota_failed" };
   if (plan.inputs.length === 0) return { ...plan, reason: "input_not_found" };
-  if (plan.inputs.length !== 1) return { ...plan, reason: "multiple_unresolved_inputs" };
   const items = latest.items!;
+  // Multiple user messages in one turn can be a completed interactive
+  // question/answer, not independent quota-rejected tasks. Require a
+  // structured reply and explicit post-answer agent work. Never infer this
+  // from an unrelated tool that completed before the answer.
+  if (pending.length === 1 && answeredQuestionFollowedByWork(latest)) {
+    return { ...plan, action: "continue", candidate: "continue",
+      reason: "answered_question_followed_by_execution" };
+  }
+  if (plan.inputs.length !== 1) return { ...plan, reason: "multiple_unresolved_inputs" };
   if (waitingOnQuestion(items)) return { ...plan, reason: "unanswered_question_or_approval" };
   if (items.some(item => !record(item) || (item.type !== "userMessage" && !PROGRESS.has(String(item.type))))) {
     return { ...plan, reason: "unknown_item_or_context_activity" };
