@@ -311,3 +311,83 @@ test('one accepted reply cannot resolve two earlier independent questions', () =
   assert.equal(plan.action, 'needs_review');
   assert.equal(plan.reason, 'multiple_unresolved_inputs');
 });
+
+test('two quota-failed turns with identical input and real work in newest continue rather than replay', () => {
+  const initial = failed('quota-first', [user('item-1', 'Run the pinned plan')]);
+  const retried = failed('quota-second', [
+    user('item-2', 'Run the pinned plan'),
+    { type: 'agentMessage', id: 'started', text: 'Reading the plan and checking the workspace' },
+    { type: 'commandExecution', id: 'cmd', status: 'completed', command: 'read-only-check' },
+    { type: 'fileChange', id: 'edit', status: 'completed', changes: [{ path: 'reworked-file' }] },
+  ]);
+  const h = history(retried, initial);
+  const first = classify(history(initial), { policy: 'replayStableUserOnly' });
+  const plan = classify(h, { previous: first, policy: 'replayStableUserOnly', replayAttempts: 1 });
+  assert.equal(plan.action, 'continue');
+  assert.equal(plan.candidate, 'continue');
+  assert.equal(plan.reason, 'replayed_input_followed_by_execution');
+  assert.equal(plan.sourceTurnId, retried.id);
+  assert.deepEqual(plan.inputs.map(x => x.turnId), ['quota-first', 'quota-second']);
+  assert.equal(replayText(plan), undefined); // Never resend the plan a third time.
+  assert.equal(recoveryDiagnostic(plan).attachmentIntegrity.status, 'not_applicable');
+});
+
+test('multiple identical earlier quota-only turns do not become multiple tasks after new execution', () => {
+  const h = history(
+    failed('attempt-3', [user('third', 'Run plan'), { type: 'commandExecution', id: 'exec', status: 'completed' }]),
+    failed('attempt-2', [user('second', 'Run plan')]),
+    failed('attempt-1', [user('first', 'Run plan')]),
+  );
+  const plan = classify(h);
+  assert.equal(plan.action, 'continue');
+  assert.equal(plan.reason, 'replayed_input_followed_by_execution');
+  assert.equal(plan.inputs.length, 3);
+});
+
+test('a new independent failed input is never discarded because the later turn executed', () => {
+  const h = history(
+    failed('later-work', [user('later', 'Additional requirement'), { type: 'commandExecution', id: 'c', status: 'completed' }]),
+    failed('first-task', [user('first', 'Run plan')]),
+  );
+  const plan = classify(h, { policy: 'replayStableUserOnly' });
+  assert.equal(plan.action, 'needs_review');
+  assert.equal(plan.reason, 'multiple_unresolved_inputs');
+  assert.equal(plan.inputs.length, 2);
+});
+
+test('identical quota-only retries without demonstrated execution remain held for Review', () => {
+  const plan = classify(history(failed('again', [user('new', 'Run plan')]),
+    failed('old', [user('old', 'Run plan')])), { policy: 'replayStableUserOnly' });
+  assert.equal(plan.action, 'needs_review');
+  assert.equal(plan.reason, 'multiple_unresolved_inputs');
+});
+
+test('replayed prompt with additional steering, unknown actions or permission requests is not safe Continue', () => {
+  const initial = failed('initial', [user('first', 'Run plan')]);
+  for (const suffix of [
+    [user('unhandled-steer', 'Now cancel everything')],
+    [{ type: 'unsupportedThing', id: 'unknown' }],
+    [{ type: 'dynamicToolCall', id: 'approval', tool: 'request_permissions', status: 'inProgress' }],
+    [{ type: 'agentMessage', id: 'question', text: 'Approve?', questions: [{ id: 'Q' }] }],
+  ]) {
+    const latest = failed('retry', [
+      user('same', 'Run plan'),
+      { type: 'commandExecution', id: 'work', status: 'completed' },
+      ...suffix,
+    ]);
+    const result = classify(history(latest, initial));
+    assert.equal(result.action, 'needs_review');
+    assert.equal(result.reason, 'multiple_unresolved_inputs');
+  }
+});
+
+test('previous failed turn with executed work is not considered an identical quota-only retry', () => {
+  const earlier = failed('earlier', [user('first', 'Run plan'),
+    { type: 'commandExecution', id: 'c1', status: 'completed' }]);
+  const later = failed('later', [user('new', 'Run plan'),
+    { type: 'commandExecution', id: 'c2', status: 'completed' }]);
+  // Prior real work is a history boundary, not an extra unsent message.
+  // Either way the newest independent progressed turn should continue.
+  const p = classify(history(later, earlier));
+  assert.equal(p.action, 'continue');
+});
