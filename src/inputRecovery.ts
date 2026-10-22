@@ -282,7 +282,7 @@ function waitingOnQuestion(items: unknown[]): boolean {
     if (!record(item)) return false;
     if (Array.isArray(item.questions) && item.questions.length > 0) return true;
     return item.type === "dynamicToolCall" &&
-      ["request_user_input", "request_permissions", "request_approval"].includes(String(item.tool)) &&
+      ["request_user_input", "request_user_input_async", "request_permissions", "request_approval"].includes(String(item.tool)) &&
       item.status !== "completed";
   });
 }
