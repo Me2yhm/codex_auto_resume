@@ -518,3 +518,16 @@ test('Inspect separates persisted continue from a fresh reclassification', async
   assert.equal(report.recentRecoveryDecisions.at(-1).action, 'continue');
   assert.equal(h.sent.length, 0);
 });
+
+test('redacted decision history is bounded after repeated source changes', async t => {
+  const h = setup(t, { available: false });
+  for (let i = 0; i < 36; i += 1) {
+    h.setTurns([turn('source-' + i)]);
+    h.advance(); await h.tick();
+  }
+  const records = h.context.workspaceState.get('codexAutoResume.recoveryDecisionHistory');
+  assert.equal(records.length, 32);
+  assert.equal(records[0].sourceTurnId, 'source-4');
+  assert.equal(records.at(-1).sourceTurnId, 'source-35');
+  assert.equal(JSON.stringify(records).includes('CTP requires separate'), false);
+});
