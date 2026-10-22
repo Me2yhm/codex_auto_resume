@@ -531,3 +531,74 @@ test('redacted decision history is bounded after repeated source changes', async
   assert.equal(records.at(-1).sourceTurnId, 'source-35');
   assert.equal(JSON.stringify(records).includes('CTP requires separate'), false);
 });
+
+
+test('Show Status does not promise Continue before the Armed input has been classified', async t => {
+  const h = setup(t, { available: false });
+  assert.equal(h.state().recoveryPlan, undefined);
+  await h.controller.showStatus();
+  assert.ok(h.vscode.messages.some(message => message.message.includes('classifying')));
+  assert.ok(h.vscode.messages.every(message => !message.message.includes('continue existing work')));
+  const bar = h.vscode.statusBars[0];
+  assert.match(bar.text, /Classifying/);
+});
+
+test('a blocked pasted TXT is identified as a safety block rather than an actionable Review', async t => {
+  const h = setup(t, { armed: {
+    recoveryPlan: { action: 'needs_review', candidate: 'replay_input',
+      reason: 'attachment_unsafe_reference', inputs: [], fingerprint: 'fixture',
+      sourceTurnId: 'failed-input', evidence: [], version: 1,
+      stableSinceMs: NOW, observedAtMs: NOW },
+  }, available: false });
+  await h.controller.showStatus();
+  assert.ok(h.vscode.messages.some(message =>
+    message.message.includes('attachment_unsafe_reference') &&
+    message.message.includes('Review cannot bypass')));
+  assert.match(h.vscode.statusBars[0].text, /TXT Blocked/);
+  assert.equal(h.vscode.statusBars[0].command, 'codexAutoResume.inspectRecoveryInput');
+});
+
+test('Inspect uses the actual opt-in policy, discloses running host, and separates saved classification', async t => {
+  const h = setup(t, { policy: 'replayStableUserOnly', available: false });
+  await h.controller.inspectRecoveryInput();
+  const report = JSON.parse(h.previews.at(-1).content);
+  assert.equal(report.effectiveUserOnlyPolicy, 'replayStableUserOnly');
+  assert.equal(report.effectiveInputRecoveryEnabled, true);
+  assert.equal(report.extensionHostPlatform, process.platform);
+  assert.equal(report.persistedRecovery.phase, 'classifying');
+  assert.equal(report.persistedRecovery.action, null);
+  assert.equal(report.reason, 'waiting_for_stable_full_history');
+  assert.equal(report.action, 'needs_review');
+});
+
+test('Review in-flight warning is explicit; a parallel Inspect is read-only and shows dispatch pending', async t => {
+  const source = turn('pending');
+  const h = setup(t, { turns: [source], available: false, armed: {
+    dispatchPending: { beforeTurnId: source.id, sentAtMs: NOW - 1000,
+      hostClaimToken: 'local-test-claim' },
+    recoveryPlan: {
+      action: 'needs_review', candidate: 'replay_input', reason: 'attachment_unsafe_reference',
+      inputs: [], fingerprint: 'test', sourceTurnId: source.id,
+      version: 1, evidence: [], stableSinceMs: NOW, observedAtMs: NOW,
+    },
+  } });
+  await h.controller.reviewRecoveryInput();
+  assert.equal(h.previews.length, 0);
+  assert.ok(h.vscode.messages.some(x =>
+    x.message.includes('checking a pending dispatch') && x.message.includes('cannot be replaced')));
+  await h.controller.showStatus();
+  assert.ok(h.vscode.messages.some(x => x.message.includes('No duplicate will be sent')));
+  await h.controller.inspectRecoveryInput();
+  const report = JSON.parse(h.previews.at(-1).content);
+  assert.equal(report.persistedRecovery.phase, 'dispatch_pending');
+  assert.equal(report.persistedRecovery.action, 'needs_review');
+  assert.equal(h.sent.length, 0);
+});
+
+test('Review without an Armed target reports absence rather than incorrectly claiming in-flight', async t => {
+  const h = setup(t, { available: false });
+  await h.context.workspaceState.update(KEY, undefined);
+  await h.controller.reviewRecoveryInput();
+  assert.equal(h.previews.length, 0);
+  assert.ok(h.vscode.messages.some(x => x.message.includes('no Armed recovery target')));
+});
