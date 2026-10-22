@@ -140,7 +140,23 @@ export function pastedTxtReferences(text: string): PastedTxtReferences {
   const header = /^# Files pasted by the user:\s*$/gmi;
   const headers = [...text.matchAll(header)];
   if (headers.length === 0) {
-    return /[\\/]\.codex[\\/]attachments[\\/]/i.test(text)
+    // Merely mentioning a managed Codex path is NOT evidence that the user
+    // pasted a file. Official IDE context also includes paths to open tabs,
+    // and an ordinary request can quote such paths without attaching them.
+    // Only an explicit but unrecognized attachment-metadata shape is unsafe
+    // to flatten. Never load a path discovered outside a recognized block.
+    const managedPath = /[\\/]\.codex[\\/]attachments[\\/]/i;
+    const looksLikeAttachmentMetadata =
+      managedPath.test(text) &&
+      (
+        /^\s*#{1,3}\s*(?:files?\s+(?:pasted|attached|uploaded)\s+by\s+(?:the\s+)?user|pasted\s+(?:files?|text|attachments?))\b/im.test(text) ||
+        text.split(/\r?\n/).some(line =>
+          managedPath.test(line) && (
+            /^\s*#{2,3}\s+"(?:\\.|[^"\\])*"\s*:\s*/.test(line) ||
+            /^\s*(?:[-*]\s*)?(?:pasted\s+(?:attachment|file|text)|attached\s+file|uploaded\s+file)\s*:/i.test(line)
+          ))
+      );
+    return looksLikeAttachmentMetadata
       ? { present: true, references: [], labels: [], error: "invalid_reference" }
       : { present: false, references: [], labels: [] };
   }
@@ -168,7 +184,12 @@ export function pastedTxtReferences(text: string): PastedTxtReferences {
     references.push(matched[2]);
     labels.push(label);
   }
-  if (!closed || references.length === 0 || references.length > 4 ||
+  // Some IDE payloads contain the standard heading with no pasted files.
+  // If the section is genuinely empty and closes normally at My request,
+  // it has nothing to dereference. Any malformed/nonempty line was rejected
+  // above, so this cannot discard actual attachment metadata.
+  if (closed && references.length === 0) return { present: false, references: [], labels: [] };
+  if (!closed || references.length > 4 ||
       new Set(references).size !== references.length) {
     return { present: true, references: [], labels: [], error: "invalid_reference" };
   }
