@@ -302,3 +302,12 @@ test('completed in-turn reply also satisfies resumed-turn progress gate', () => 
   beforeAcknowledgement.items = beforeAcknowledgement.items.slice(0, 4);
   assert.equal(hasUnambiguousInputProgress(beforeAcknowledgement), false);
 });
+
+test('one accepted reply cannot resolve two earlier independent questions', () => {
+  const t = answeredTurn();
+  t.items.splice(2, 0, { type: 'agentMessage', id: 'second-question',
+    text: 'Second confirmation?', questions: [{ id: 'Q-002' }] });
+  const plan = classify(history(t));
+  assert.equal(plan.action, 'needs_review');
+  assert.equal(plan.reason, 'multiple_unresolved_inputs');
+});
