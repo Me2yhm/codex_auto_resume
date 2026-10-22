@@ -8,7 +8,7 @@ A saved recovery now selects `continue`, `replay_input`, or `needs_review` for a
 
 | Observed evidence | Default action |
 | --- | --- |
-| Full history, one unambiguous input followed by substantive agent/plan/reasoning output or recorded tool activity | `continue`, using the existing configured prompt |
+| Full history, one processed input or a verified in-turn structured Q&A followed by an explicit assistant acknowledgement | `continue`, using the existing configured prompt |
 | Full history contains only one replayable plain-text user input | `needs_review`, with a replay candidate and the exact original text retained |
 | Missing, summary-only, paginated-incomplete or unknown history; empty activity placeholders; steering; multiple unresolved inputs; unsupported structured payload | `needs_review`, no automatic send |
 
