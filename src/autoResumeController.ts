@@ -453,7 +453,7 @@ export class AutoResumeController implements vscode.Disposable {
         threadId: armed.threadId, action: plan.action, reason: plan.reason, inputs: plan.inputs,
         pastedTxtAttachment: plan.attachmentIntegrity ?? null,
         attachmentSha256: plan.pastedTxtSnapshots?.map(item => item.sha256) ?? [],
-        noteOnTxt: "Verified TXT contents are snapshotted locally and appended verbatim on replay; this preview does not duplicate their bodies.",
+        noteOnTxt: "Verified TXT content is retained and sent as a separate native UI attachment; the original prompt remains unchanged.",
       }, null, 2) });
       await vscode.window.showTextDocument(document, { preview: true });
       if (plan.stale || plan.candidate !== "replay_input" || replayText(plan) === undefined) {
@@ -484,6 +484,7 @@ export class AutoResumeController implements vscode.Disposable {
       const approved: RecoveryPlan = { ...check, action, reason: "user_confirmed_action",
         approval: { action, fingerprint: check.fingerprint } };
       await this.saveArmed({ ...current, recoveryPlan: approved, replayAttempts: 0 });
+      await this.saveRecoveryDecision(current.threadId, approved);
       this.availabilityCandidate = undefined;
       this.renderStatus();
       void vscode.window.showInformationMessage(`Saved recovery action: ${action}. Two fresh available-quota reads are still required; nothing was sent by this command.`);
