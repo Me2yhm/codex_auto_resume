@@ -499,3 +499,22 @@ test('later unhandled instruction cannot be hidden by completed question flow', 
   assert.equal(h.state().recoveryPlan.action, 'needs_review');
   assert.equal(h.sent.length, 0);
 });
+
+test('Inspect separates persisted continue from a fresh reclassification', async t => {
+  const source = answeredQuestionTurn();
+  const h = setup(t, { turns: [source], available: false });
+  await h.tick();
+  const saved = h.context.workspaceState.get('codexAutoResume.recoveryDecisionHistory');
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].action, 'continue');
+  h.setTurns([{ ...source, id: 'manual-turn', status: 'inProgress',
+    error: null, items: [user('manual', 'Continue')] }]);
+  await h.controller.inspectRecoveryInput();
+  const report = JSON.parse(h.previews.at(-1).content);
+  assert.equal(report.action, 'needs_review');
+  assert.equal(report.reason, 'latest_turn_not_quota_failed');
+  assert.equal(report.persistedRecovery.action, 'continue');
+  assert.equal(report.persistedRecovery.reason, 'answered_question_followed_by_execution');
+  assert.equal(report.recentRecoveryDecisions.at(-1).action, 'continue');
+  assert.equal(h.sent.length, 0);
+});
