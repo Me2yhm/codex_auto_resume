@@ -6,7 +6,7 @@ import * as path from "path";
 export function resolveOfficialPastedTxtPath(
   sourcePath: string,
   root: string,
-  paths: typeof path = path,
+  paths: path.PlatformPath = path,
 ): { filesystemPath: string; sessionDirectory: string; sessionId: string } | undefined {
   if (typeof sourcePath !== "string" || !paths.isAbsolute(sourcePath) ||
       sourcePath.includes("\u0000")) return undefined;
@@ -37,7 +37,7 @@ export function resolveOfficialPastedTxtPath(
 /** A realpath may have different separators/casing from the serialized
  * attachment. It must still resolve to the SAME two-level managed file. */
 export function realPastedTxtIsConfined(
-  realRoot: string, realFile: string, sessionId: string, paths: typeof path = path,
+  realRoot: string, realFile: string, sessionId: string, paths: path.PlatformPath = path,
 ): boolean {
   const relative = paths.relative(realRoot, realFile);
   if (!relative || paths.isAbsolute(relative)) return false;
