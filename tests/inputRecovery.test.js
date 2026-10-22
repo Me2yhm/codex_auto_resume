@@ -368,6 +368,7 @@ test('replayed prompt with additional steering, unknown actions or permission re
     [user('unhandled-steer', 'Now cancel everything')],
     [{ type: 'unsupportedThing', id: 'unknown' }],
     [{ type: 'dynamicToolCall', id: 'approval', tool: 'request_permissions', status: 'inProgress' }],
+    [{ type: 'dynamicToolCall', id: 'question-async', tool: 'request_user_input_async', status: 'inProgress' }],
     [{ type: 'agentMessage', id: 'question', text: 'Approve?', questions: [{ id: 'Q' }] }],
   ]) {
     const latest = failed('retry', [
