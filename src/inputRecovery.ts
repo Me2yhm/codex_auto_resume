@@ -251,6 +251,32 @@ export function matchesReplayedInput(turn: CodexTurn, plan: RecoveryPlan): boole
   return canonical(actual) === canonical(expected);
 }
 
+/**
+ * A second quota-failed turn can be the result of an earlier automatic replay.
+ * If the newest turn has substantively executed the exact same user input,
+ * prior *user-only* quota rejections of that identical input are not extra
+ * independent instructions. No persistence of the replay lineage is required:
+ * a reload or a missed UI receipt may have cleared it before re-exhaustion.
+ *
+ * Reject any changed input, additional user message, older work, unknown
+ * item, or unhandled question; such cases must remain needs_review.
+ */
+function repeatedQuotaInputWithExecution(pending: CodexTurn[]): boolean {
+  if (pending.length < 2) return false;
+  const newest = pending[0];
+  if (!hasUnambiguousInputProgress(newest) || !Array.isArray(newest.items)) return false;
+  const first = newest.items[0];
+  if (!record(first) || first.type !== "userMessage" || !Array.isArray(first.content)) return false;
+  const expectedContent = canonical(first.content);
+  return pending.slice(1).every(turn => {
+    if (!isQuotaFailure(turn) || turn.itemsView !== "full" ||
+        !Array.isArray(turn.items) || turn.items.length !== 1) return false;
+    const item = turn.items[0];
+    return record(item) && item.type === "userMessage" &&
+      Array.isArray(item.content) && canonical(item.content) === expectedContent;
+  });
+}
+
 function waitingOnQuestion(items: unknown[]): boolean {
   return items.some(item => {
     if (!record(item)) return false;
@@ -314,6 +340,14 @@ export function classifyRecoveryHistory(
   if (!isQuotaFailure(latest)) return { ...plan, reason: "latest_turn_not_quota_failed" };
   if (plan.inputs.length === 0) return { ...plan, reason: "input_not_found" };
   const items = latest.items!;
+  // An accepted input replay can hit quota a second time after real work.
+  // Earlier quota-only turns with the IDENTICAL input are historical attempts,
+  // not multiple unresolved instructions. Changed/independent inputs stay
+  // blocked, even when the newest turn has recorded work.
+  if (repeatedQuotaInputWithExecution(pending)) {
+    return { ...plan, action: "continue", candidate: "continue",
+      reason: "replayed_input_followed_by_execution" };
+  }
   // Multiple user messages in one turn can be a completed interactive
   // question/answer, not independent quota-rejected tasks. Require a
   // structured reply and explicit post-answer agent work. Never infer this
