@@ -602,3 +602,19 @@ test('Review without an Armed target reports absence rather than incorrectly cla
   assert.equal(h.previews.length, 0);
   assert.ok(h.vscode.messages.some(x => x.message.includes('no Armed recovery target')));
 });
+
+
+test('changing replayStableUserOnly setting takes effect in Inspect without reloading the extension', async t => {
+  const h = setup(t, { policy: 'review', available: false });
+  await h.controller.inspectRecoveryInput();
+  const before = JSON.parse(h.previews.at(-1).content);
+  assert.equal(before.effectiveUserOnlyPolicy, 'review');
+  assert.equal(before.reason, 'user_only_history_requires_review');
+
+  h.vscode.configuration['codexAutoResume.inputRecovery.userOnlyPolicy'] = 'replayStableUserOnly';
+  await h.controller.inspectRecoveryInput();
+  const after = JSON.parse(h.previews.at(-1).content);
+  assert.equal(after.effectiveUserOnlyPolicy, 'replayStableUserOnly');
+  assert.equal(after.reason, 'waiting_for_stable_full_history');
+  assert.equal(after.persistedRecovery.action, null);
+});
