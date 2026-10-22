@@ -480,3 +480,13 @@ function answeredQuestionTurn() {
   ];
   return source;
 }
+
+test('completed in-turn question response can resume without Review', async t => {
+  const h = setup(t, { turns: [answeredQuestionTurn()] });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'continue');
+  assert.equal(h.state().recoveryPlan.reason, 'answered_question_followed_by_execution');
+  h.advance(); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
+});
