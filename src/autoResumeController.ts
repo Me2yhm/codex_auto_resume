@@ -390,6 +390,7 @@ export class AutoResumeController implements vscode.Disposable {
     }
     await this.saveArmed(next);
     if (previous?.fingerprint !== plan.fingerprint || previous.reason !== plan.reason || previous.action !== plan.action) {
+      await this.saveRecoveryDecision(next.threadId, plan);
       this.output.appendLine(`[auto-resume] recovery action=${plan.action}; reason=${plan.reason}; sourceTurn=${plan.sourceTurnId || "<unavailable>"}; preservedInputs=${plan.inputs.length}`);
     }
     return this.armed();
