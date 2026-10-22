@@ -35,7 +35,7 @@ Both policies retain two independent available-quota reads before dispatch. Auto
 
 ### `Codex Auto Resume: Inspect Recovery Input`
 
-Read-only. It reads the Armed work thread, or the selected recent workspace work thread when nothing is Armed, and opens an **untitled JSON diagnostic**. It does not start, resume or write a work turn. The report contains thread/turn/message IDs, source fingerprint, items-view/type information, byte counts, classification reason and official extension version. It excludes original prompt text, tool output and credentials. Inspect IDs and metadata before sharing the report.
+Read-only. It reads the Armed work thread, or the selected recent workspace work thread when nothing is Armed, and opens an **untitled JSON diagnostic**. It does not start, resume or write a work turn. The report contains thread/turn/message IDs, source fingerprint, items-view/type information, byte counts, classification reason and official extension version. It excludes original prompt text, tool output and credentials. Inspect reports its latest-history classification separately from persisted Armed/Verifying state. It also includes up to 32 source-free workspace decision transitions so manual continuation does not erase why a former turn was held. Earlier version decisions cannot be recreated. Inspect IDs and metadata before sharing the report.
 
 Useful sample classes are (1) a work turn that executed and then exhausted quota, (2) a new task submitted after quota was already exhausted, and (3) a selection-generated question-plus-answer submitted after exhaustion. No artificial quota depletion is needed.
 
