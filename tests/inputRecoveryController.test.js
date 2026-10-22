@@ -490,3 +490,12 @@ test('completed in-turn question response can resume without Review', async t =>
   assert.equal(h.sent.length, 1);
   assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
 });
+
+test('later unhandled instruction cannot be hidden by completed question flow', async t => {
+  const source = answeredQuestionTurn();
+  source.items.push(user('later-input', 'Additional unrelated instruction.'));
+  const h = setup(t, { turns: [source] });
+  await h.tick(); h.advance(); await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+  assert.equal(h.sent.length, 0);
+});
