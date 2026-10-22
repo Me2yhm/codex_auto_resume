@@ -137,6 +137,22 @@ Different prompts, new steering, unanswered questions/permissions, malformed/unk
 
 [GitHub Actions #39739232124](https://github.com/Me2yhm/codex_auto_resume/actions/runs/39739232124) PASS: Linux full tests **303 pass, 0 fail, 1 Windows-specific skipped**; targeted Windows tests **147 pass, 0 fail**; both TS checks and VSIX packaging passed. The actual user's *next* Windows quota recovery with the new build remains an E2E check. Avoid manually replaying the entire plan, which is already running or was partially executed.
 
+## Remote short authorization incorrectly flagged as attachment-invalid (2026-10-22)
+
+A Linux SSH extension host running 0.3.11 auto-resumed a long optimization task successfully. Later, the user manually sent `授权G2` (executed), then `授权G3` while quota was about to exhaust. The latter turn contained **only one failed `userMessage`** (400 serialized input bytes, no execution records), but Input Recovery recorded `needs_review / attachment_invalid_reference`, `attachmentIntegrity.count=0` and `bytes=0`, despite the effective `replayStableUserOnly` setting. The user did not visibly submit a new TXT attachment with that authorization.
+
+Code analysis identified two false-positive forms in `pastedTxtReferences`: (1) with no official `# Files pasted by the user:` heading, **any** mention of a `.codex/attachments/` path was treated as malformed attachment metadata, even in the IDE's `## Open tabs:` list or an ordinary instruction; (2) an official `# Files pasted by the user:` heading with an empty, properly closed block was considered invalid. Inspect does not contain the original input body, so **which exact form occurred in the reported G3 turn is still unverified**. Neither case proves a real attached file was missing or unsafe.
+
+The parser now distinguishes:
+- Actual **recognized official pasted-TXT metadata**: still SHA-pinned, checks path/size/encoding/digest/symlinks before delivery and sends a separate `turnStart.context.attachments` payload.
+- **Explicit malformed or unrecognized attachment metadata** (e.g. `Pasted attachment: <managed path>`, altered section headers/entries, truncated official block): **still blocked**, fail closed.
+- A managed TXT filename mentioned only in an IDE open-tab path or ordinary `## My request` text, **without a pasted-file entry**: normal text; do not read the file or infer an attachment.
+- An empty *properly closed* official pasted-files section: no attached TXT.
+  
+With `replayStableUserOnly`, a stable user-only quota-rejected G3 input in the latter two categories can be replayed exactly **once** after ordinary quota confirmation, without adding stale TXT attachments. Pre-existing persisted `attachment_invalid_reference` plans are recalculated; when formerly stale, they require fresh stable observations before allowing replay. No override of dispatch/authorization safety is introduced.
+
+[CI #39746264197](https://github.com/Me2yhm/codex_auto_resume/actions/runs/39746264197): Linux full suite **311 pass, 0 fail, 1 Windows-only skipped**; Windows targeted native file, UI IPC and input-recovery suite **155 pass, 0 fail**; typechecks and VSIX package PASS. Native SSH E2E of **this specific G3 recovery** still remains unverified. The real user's failed-turn text is available only in their local `Review Recovery Input` preview and must be redacted before sharing if further diagnosis is needed.
+
 ## Required real-environment review
 
 Install only a review VSIX in a non-critical workspace initially. Keep `userOnlyPolicy=review`. Use `Inspect Recovery Input` for the three actual sample classes, verify original input completeness locally with `Review Recovery Input`, and confirm the official installed extension version. A real replay into the same conversation, new input during an Armed wait, reload persistence and a second quota exhaustion must be checked before broad release. Avoid manufacturing quota exhaustion or changing existing active task permissions.
