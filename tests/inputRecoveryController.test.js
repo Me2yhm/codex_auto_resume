@@ -618,3 +618,56 @@ test('changing replayStableUserOnly setting takes effect in Inspect without relo
   assert.equal(after.reason, 'waiting_for_stable_full_history');
   assert.equal(after.persistedRecovery.action, null);
 });
+
+test('quota-replayed input that executed and exhausted quota again sends only the default Continue', async t => {
+  const original = turn('original-user-only');
+  const replay = turn('replay-executed', true);
+  const h = setup(t, { turns: [replay, original], policy: 'replayStableUserOnly', armed: {
+    interruptedTurnId: replay.id, replayAttempts: 1,
+  } });
+  await h.tick();
+  const chosen = h.state().recoveryPlan;
+  assert.equal(chosen.action, 'continue');
+  assert.equal(chosen.reason, 'replayed_input_followed_by_execution');
+  assert.equal(chosen.inputs.length, 2);
+  assert.equal(h.state().replayAttempts, 0);
+  await h.controller.showStatus();
+  assert.ok(h.vscode.messages.some(msg => msg.message.includes('continue existing work')));
+  h.advance(); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].threadId, THREAD);
+  assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
+  assert.deepEqual(h.sent[0].overrides, {});
+});
+
+test('duplicate pasted-TXT inputs that already executed continue without sending attachments again', async t => {
+  const first = turn('first-rejected');
+  const second = turn('second-exhausted', true);
+  const raw = '# Files pasted by the user:\n\n' +
+    '## "review plan": C:\\Users\\example\\.codex/attachments/' +
+    'cfe468d2-bbed-4543-9d64-f01697f97142/Pasted text.txt\n\n' +
+    '## My request:\nExecute the plan.\n';
+  first.items[0].content[0].text = raw;
+  second.items[0].content[0].text = raw;
+  const h = setup(t, { turns: [second, first], policy: 'replayStableUserOnly' });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'continue');
+  assert.equal(h.state().recoveryPlan.reason, 'replayed_input_followed_by_execution');
+  const records = h.context.workspaceState.get('codexAutoResume.recoveryDecisionHistory');
+  assert.equal(records.at(-1).reason, 'replayed_input_followed_by_execution');
+  h.advance(); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
+  assert.deepEqual(h.sent[0].overrides, {});
+});
+
+test('replayed turn changing its request after execution cannot swallow an independent rejected task', async t => {
+  const original = turn('old-user-only');
+  const retried = turn('new-execution', true);
+  retried.items[0].content[0].text = 'Independent new instructions, not the original.';
+  const h = setup(t, { turns: [retried, original], policy: 'replayStableUserOnly' });
+  await h.tick(); h.advance(); await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+  assert.equal(h.state().recoveryPlan.reason, 'multiple_unresolved_inputs');
+  assert.equal(h.sent.length, 0);
+});
