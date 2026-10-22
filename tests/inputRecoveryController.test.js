@@ -693,3 +693,34 @@ test('old persisted multiple-input Review is repaired on next poll after install
   assert.equal(h.sent.length, 1);
   assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
 });
+
+
+test("Remote G3 with a Codex attachment path in IDE open tabs replays exactly once as ordinary text", async t => {
+  const source = turn('quota-g3');
+  const text = [
+    "# Context from my IDE setup:",
+    "",
+    "## Open tabs:",
+    "- MAX_SCORE_REVIEW.md: doc/MAX_SCORE_REVIEW.md",
+    "- Pasted text.txt: /home/test/.codex/attachments/0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3/Pasted text.txt",
+    "",
+    "## My request:",
+    "授权G3",
+    "",
+  ].join("\n");
+  source.items[0].content[0].text = text;
+  const h = setup(t, { turns: [source], policy: 'replayStableUserOnly', available: false });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.reason, 'waiting_for_stable_full_history');
+  assert.equal(h.state().recoveryPlan.attachmentIntegrity, undefined);
+  h.advance(20_000); await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'replay_input');
+  assert.equal(h.state().recoveryPlan.reason, 'opt_in_stable_user_only_history');
+  h.setQuota(quota(true));
+  h.advance(); await h.tick(); h.advance(); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].prompt, text);
+  assert.deepEqual(h.sent[0].overrides, {});
+  h.advance(); await h.tick();
+  assert.equal(h.sent.length, 1);
+});
