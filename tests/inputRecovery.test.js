@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { classifyRecoveryHistory, replayText, recoveryDiagnostic, MAX_INPUT_BYTES } = require('../dist/inputRecovery');
+const { classifyRecoveryHistory, replayText, recoveryDiagnostic, MAX_INPUT_BYTES,
+  hasUnambiguousInputProgress } = require('../dist/inputRecovery');
 const { readRecoveryHistory } = require('../dist/recoveryHistory');
 const NOW = 1_900_000_000_000;
 const input = (text = 'Original input\nCTP requires separate authorization.') => ({ type: 'text', text, text_elements: [] });
@@ -292,4 +293,12 @@ test('answer-only user turn with prior question and new agent response also cont
   ]);
   const plan = classify(history(t));
   assert.equal(plan.action, 'continue');
+});
+
+test('completed in-turn reply also satisfies resumed-turn progress gate', () => {
+  const complete = answeredTurn();
+  assert.equal(hasUnambiguousInputProgress(complete), true);
+  const beforeAcknowledgement = answeredTurn();
+  beforeAcknowledgement.items = beforeAcknowledgement.items.slice(0, 4);
+  assert.equal(hasUnambiguousInputProgress(beforeAcknowledgement), false);
 });
