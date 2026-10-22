@@ -106,6 +106,14 @@ The original file path, byte length, and SHA-256 remain pinned in workspace stat
 Latest automated validation: [GitHub Actions #185](https://github.com/Me2yhm/codex_auto_resume/actions/runs/39137146542) PASS — `npm ci`, typecheck, **271/271 tests**, VSIX package and artifact upload. Artifact: `codex-auto-resume-vsix` (ID `12139852366`, SHA-256 `f3484c5cb5fa2dc04e71c73bfb89fab422f174da5eecae67adf2b1d7f62abef6`).
 
 **Live Remote confirmation remains required.** The report directly proves the context field and pasted-file metadata preparation, but the diagnostic did not fully expose the helper that normalizes attachments before assigning the official context array. Therefore deterministic tests prove the payload we construct, not yet that the installed UI renders it identically to the original paste. In a non-critical Remote test, verify the message body is unchanged, the TXT appears as a separate attachment, the model can read the full plan, and only one turn is created. Keep PR #4 Draft until this passes. High-confidence automatic replay remains unchanged and deferred.
+## In-turn Q&A continuation regression
+
+A real quota-failed long turn contained an original task userMessage and a later serialized question reply userMessage within the **same turn**. After the reply, Codex visibly acknowledged the supplied information and continued working before exhausting quota. The old classifier stopped at `multiple_unresolved_inputs` before examining post-reply execution.
+
+The narrow fix selects `continue` only when all subsequent user inputs match the official structured question-reply format, each has a later nonempty assistant acknowledgement, and no additional unanswered question or pending execution permission remains. Ordinary steering and separately rejected turns still require review. The opt-in user-only automatic replay policy is unchanged.
+
+`Inspect Recovery Input` now displays the newly calculated historical classification **and** the currently persisted Armed/Verifying decision separately. Workspace state retains the last 32 redacted decision transitions (status, source turn, reason, input count and fingerprint), never raw prompt contents, to aid investigation after manual continuation. The transition log starts only after installation of this version.
+
 ## Required real-environment review
 
 Install only a review VSIX in a non-critical workspace initially. Keep `userOnlyPolicy=review`. Use `Inspect Recovery Input` for the three actual sample classes, verify original input completeness locally with `Review Recovery Input`, and confirm the official installed extension version. A real replay into the same conversation, new input during an Armed wait, reload persistence and a second quota exhaustion must be checked before broad release. Avoid manufacturing quota exhaustion or changing existing active task permissions.
