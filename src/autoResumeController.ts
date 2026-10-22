@@ -333,6 +333,28 @@ export class AutoResumeController implements vscode.Disposable {
       ? "replayStableUserOnly" : "review";
   }
 
+  private recoveryDecisionHistory(): RecoveryDecisionRecord[] {
+    const value = this.context.workspaceState.get<unknown>(RECOVERY_DECISIONS_KEY);
+    if (!Array.isArray(value)) return [];
+    return value.filter(item => item && typeof item.threadId === "string" &&
+      typeof item.reason === "string" && typeof item.action === "string")
+      .slice(-MAX_RECOVERY_DECISIONS) as RecoveryDecisionRecord[];
+  }
+
+  private async saveRecoveryDecision(threadId: string, plan: RecoveryPlan): Promise<void> {
+    const entry: RecoveryDecisionRecord = {
+      observedAtMs: Date.now(), threadId, sourceTurnId: plan.sourceTurnId,
+      action: plan.action, reason: plan.reason, preservedInputs: plan.inputs.length,
+      fingerprint: plan.fingerprint,
+    };
+    try {
+      await this.context.workspaceState.update(RECOVERY_DECISIONS_KEY,
+        [...this.recoveryDecisionHistory(), entry].slice(-MAX_RECOVERY_DECISIONS));
+    } catch {
+      this.output.appendLine("[auto-resume] decision history could not be stored");
+    }
+  }
+
   private async prepareRecoveryInput(armed: ArmedResume): Promise<ArmedResume | undefined> {
     if (!this.inputRecoveryEnabled() || armed.dispatchPending || armed.resumeTurnId) return armed;
     const history = await readRecoveryHistory(this.client!, armed.threadId);
