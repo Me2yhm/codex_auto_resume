@@ -26,11 +26,11 @@ const message = (file, request = "Please execute the offline plan.") =>
   "# Files pasted by the user:\n\n" +
   '## "# Optimizer 数据调研计划——本机 Codex 执行版…": ' + file + "\n\n" +
   "## My request:\n" + request + "\n";
-const classify = text => classifyRecoveryHistory({ complete: true, turns: [{
+const classify = (text, options = {}) => classifyRecoveryHistory({ complete: true, turns: [{
   id: "failed", status: "failed", error: { codexErrorInfo: "usageLimitExceeded" },
   itemsView: "full", items: [{ type: "userMessage", id: "item-1",
     content: [{ type: "text", text, text_elements: [] }] }],
-}] }, { nowMs: NOW });
+}] }, { nowMs: NOW, ...options });
 
 test("real Codex-style pasted TXT keeps original body and yields a separate official UI attachment", async t => {
   const originalContent = "计划第一步：只读调查\n" + "数据不可修改\n".repeat(3000);
@@ -239,4 +239,99 @@ test("pasted Markdown stays a separate attachment and the original prompt remain
   }]);
   assert.ok(!replay.includes(markdown));
   assert.ok(!replay.includes("verified contents of pasted TXT attachment"));
+});
+
+
+test("remote G3 authorization: IDE open-tab path to old TXT is context, not a new attachment", async () => {
+  const ordinary = [
+    "# Context from my IDE setup:",
+    "",
+    "## Open tabs:",
+    "- MAX_SCORE_REVIEW.md: doc/MAX_SCORE_REVIEW.md",
+    "- Pasted text.txt: /home/test/.codex/attachments/" + ID + "/Pasted text.txt",
+    "",
+    "## My request:",
+    "授权G3",
+    "",
+  ].join("\n");
+  assert.deepEqual(pastedTxtReferences(ordinary),
+    { present: false, references: [], labels: [] });
+  const first = await materializePastedTxt(classify(ordinary, {
+    policy: "replayStableUserOnly",
+  }));
+  assert.equal(first.reason, "waiting_for_stable_full_history");
+  assert.equal(first.attachmentIntegrity, undefined);
+  const ready = await materializePastedTxt(classify(ordinary, {
+    policy: "replayStableUserOnly", previous: first,
+    nowMs: NOW + 20_000,
+  }), first);
+  assert.equal(ready.action, "replay_input");
+  assert.equal(ready.reason, "opt_in_stable_user_only_history");
+  assert.equal(replayText(ready), ordinary);
+  assert.deepEqual(replayAttachments(ready), []);
+  assert.equal(await verifyPastedTxtBeforeSend(ready), true);
+});
+
+test("ordinary request quoting a Codex TXT path does not cause a filesystem read", async () => {
+  const plain = "## My request:\nRead-only check of path " +
+    "/home/test/.codex/attachments/" + ID + "/Pasted text.txt\n";
+  assert.equal(pastedTxtReferences(plain).present, false);
+  assert.equal(replayText(classify(plain)), plain);
+  const saved = await materializePastedTxt(classify(plain));
+  assert.equal(saved.reason, "user_only_history_requires_review");
+  assert.equal(saved.attachmentIntegrity, undefined);
+});
+
+test("an empty official pasted-files section closed by My request has no attachments", async () => {
+  const source = [
+    "# Context from my IDE setup:",
+    "",
+    "# Files pasted by the user:",
+    "",
+    "## My request:",
+    "授权G3",
+    "",
+  ].join("\n");
+  assert.deepEqual(pastedTxtReferences(source),
+    { present: false, references: [], labels: [] });
+  assert.equal(replayText(await materializePastedTxt(classify(source))), source);
+});
+
+test("unknown explicit pasted metadata and malformed official blocks still fail closed", async () => {
+  for (const source of [
+    "Pasted attachment: /home/test/.codex/attachments/" + ID +
+      "/Pasted text.txt\nRun plan",
+    "# Attached files:\n\n- /home/test/.codex/attachments/" + ID +
+      "/Pasted text.txt\n\n## My request:\nRun plan\n",
+    "# Files pasted by the user:\n\n## \"plan\": /tmp/outside.txt\n\n## My request:\nRun",
+    "# Files pasted by the user:\n\n## \"plan\": /tmp/other.pdf\n\n## My request:\nRun",
+    "# Files pasted by the user:\n\n## Unknown heading:\nRun",
+    "# Files pasted by the user:\n", // Truncated/incomplete section
+  ]) {
+    const first = await materializePastedTxt(classify(source));
+    assert.equal(first.reason, "attachment_invalid_reference", source);
+    assert.equal(first.action, "needs_review");
+    assert.equal(replayText(first), undefined);
+  }
+});
+
+test("old invalid_reference from an ordinary IDE path can reclassify after install", async () => {
+  const text = "# Context from my IDE setup:\n\n## Open tabs:\n" +
+    "- Pasted text.txt: /home/test/.codex/attachments/" +
+    ID + "/Pasted text.txt\n\n## My request:\n授权G3\n";
+  const earlier = {
+    ...classify(text), stale: true, action: "needs_review",
+    reason: "attachment_invalid_reference",
+    attachmentIntegrity: { status: "invalid_reference", count: 0, bytes: 0 },
+  };
+  const fresh = await materializePastedTxt(classify(text, {
+    nowMs: NOW + 12_000, previous: earlier, policy: "replayStableUserOnly",
+  }), earlier);
+  assert.equal(fresh.reason, "waiting_for_stable_full_history");
+  const after = await materializePastedTxt(classify(text, {
+    nowMs: NOW + 24_000, previous: fresh, policy: "replayStableUserOnly",
+  }), fresh);
+  assert.equal(after.action, "replay_input");
+  assert.equal(replayText(after), text);
+  assert.deepEqual(replayAttachments(after), []);
 });
