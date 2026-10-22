@@ -149,7 +149,7 @@ export function pastedTxtReferences(text: string): PastedTxtReferences {
     const looksLikeAttachmentMetadata =
       managedPath.test(text) &&
       (
-        /^\s*#{1,3}\s*(?:files?\s+(?:pasted|attached|uploaded)\s+by\s+(?:the\s+)?user|pasted\s+(?:files?|text|attachments?))\b/im.test(text) ||
+        /^\s*#{1,3}\s*(?:files?\s+(?:pasted|attached|uploaded)\s+by\s+(?:the\s+)?user|(?:pasted|attached|uploaded)\s+(?:files?|text|attachments?)|attachments?)\b/im.test(text) ||
         text.split(/\r?\n/).some(line =>
           managedPath.test(line) && (
             /^\s*#{2,3}\s+"(?:\\.|[^"\\])*"\s*:\s*/.test(line) ||
