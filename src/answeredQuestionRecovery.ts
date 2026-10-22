@@ -60,6 +60,11 @@ export function answeredQuestionFollowedByWork(turn: CodexTurn): boolean {
       (!Array.isArray(item.questions) || item.questions.length === 0))) return false;
   }
   const last = replies[replies.length - 1];
+  // Each historical question must have an answer, not merely each message
+  // with questions. A separate unanswered question could also be historical.
+  const questionCount = items.reduce((total, item) =>
+    total + (obj(item) && Array.isArray(item.questions) ? item.questions.length : 0), 0);
+  if (questionCount > ids.length) return false;
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
     if (!obj(item)) return false;
