@@ -409,8 +409,21 @@ export class AutoResumeController implements vscode.Disposable {
     const plan = await materializePastedTxt(classifyRecoveryHistory(history, { nowMs: Date.now(), previous: armed?.recoveryPlan,
       replaySourceTurnId: history.turns[0]?.id === armed?.replayTurnId ? armed?.replaySourceTurnId : undefined,
     }), armed?.recoveryPlan);
-    const report = { threadId, ...recoveryDiagnostic(plan),
-      officialExtensionVersion: vscode.extensions?.getExtension("openai.chatgpt")?.packageJSON?.version ?? "unknown" };
+    const report = {
+      threadId,
+      interpretation: "action/reason below are a fresh history classification, not necessarily the saved recovery action",
+      ...recoveryDiagnostic(plan),
+      persistedRecovery: armed ? {
+        phase: armed.dispatchPending ? "dispatch_pending" : armed.resumeTurnId ? "verifying" : "armed",
+        interruptedTurnId: armed.interruptedTurnId,
+        action: armed.recoveryPlan?.action ?? null,
+        reason: armed.recoveryPlan?.reason ?? null,
+        sourceTurnId: armed.recoveryPlan?.sourceTurnId ?? null,
+        fingerprint: armed.recoveryPlan?.fingerprint ?? null,
+      } : null,
+      recentRecoveryDecisions: this.recoveryDecisionHistory().filter(entry => entry.threadId === threadId),
+      officialExtensionVersion: vscode.extensions?.getExtension("openai.chatgpt")?.packageJSON?.version ?? "unknown",
+    };
     const document = await vscode.workspace.openTextDocument({ language: "json", content: JSON.stringify(report, null, 2) });
     await vscode.window.showTextDocument(document, { preview: true });
   }
