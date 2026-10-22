@@ -671,3 +671,25 @@ test('replayed turn changing its request after execution cannot swallow an indep
   assert.equal(h.state().recoveryPlan.reason, 'multiple_unresolved_inputs');
   assert.equal(h.sent.length, 0);
 });
+
+test('old persisted multiple-input Review is repaired on next poll after installing new VSIX', async t => {
+  const original = turn('first-quota-rejection');
+  const replayed = turn('replayed-then-exhausted', true);
+  const h = setup(t, { turns: [replayed, original], policy: 'replayStableUserOnly',
+    armed: { interruptedTurnId: replayed.id } });
+  const former = {
+    version: 1, action: 'needs_review', reason: 'multiple_unresolved_inputs',
+    candidate: undefined, sourceTurnId: replayed.id, fingerprint: 'previous-version-fingerprint',
+    inputs: [], evidence: [], stale: false,
+    stableSinceMs: NOW - 60000, observedAtMs: NOW - 30000,
+  };
+  await h.context.workspaceState.update(KEY, { ...h.state(), recoveryPlan: former });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'continue');
+  assert.equal(h.state().recoveryPlan.reason, 'replayed_input_followed_by_execution');
+  await h.controller.showStatus();
+  assert.ok(h.vscode.messages.some(message => message.message.includes('continue existing work')));
+  h.advance(); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
+});
