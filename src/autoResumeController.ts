@@ -30,6 +30,18 @@ import {
 
 const STATE_KEY = "codexAutoResume.armed";
 const PENDING_QUOTA_CANDIDATE_KEY = "codexAutoResume.pendingQuotaCandidate";
+const RECOVERY_DECISIONS_KEY = "codexAutoResume.recoveryDecisionHistory";
+const MAX_RECOVERY_DECISIONS = 32;
+
+interface RecoveryDecisionRecord {
+  observedAtMs: number;
+  threadId: string;
+  sourceTurnId: string;
+  action: "continue" | "replay_input" | "needs_review";
+  reason: string;
+  preservedInputs: number;
+  fingerprint: string;
+}
 const RESUME_OBSERVATION_POLL_MS = 1_000;
 const AVAILABILITY_CONFIRMATION_MS = 10_000;
 const AVAILABILITY_CONFIRMATION_TIMEOUT_MS = 30_000;
