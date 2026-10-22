@@ -100,6 +100,27 @@ test("real Windows host: mixed-separator official pasted TXT is read, pinned, an
       label: "Test plan", path: mixed, fsPath: mixed, isPastedText: true,
     }]);
     assert.equal(await verifyPastedTxtBeforeSend(stable, home), true);
+
+    // Upgrade regression: an earlier build persisted attachment_unsafe_reference
+    // for this very same mixed-slash path. The next two stable observations
+    // must recover the verified snapshot without demanding another Review.
+    const formerlyBlocked = {
+      ...first, action: "needs_review", reason: "attachment_unsafe_reference",
+      stale: true, approval: undefined,
+      attachmentIntegrity: { status: "unsafe_reference", count: 1, bytes: 0 },
+    };
+    const recovered = await materializePastedTxt(classifyRecoveryHistory(input.history, {
+      nowMs: 1_900_000_100_000, previous: formerlyBlocked, policy: "replayStableUserOnly",
+    }), formerlyBlocked, home);
+    assert.equal(recovered.attachmentIntegrity.status, "verified");
+    assert.equal(recovered.action, "needs_review"); // First fresh observation.
+    const recoveredStable = await materializePastedTxt(classifyRecoveryHistory(input.history, {
+      nowMs: 1_900_000_120_000, previous: recovered, policy: "replayStableUserOnly",
+    }), recovered, home);
+    assert.equal(recoveredStable.action, "replay_input");
+    assert.equal(replayText(recoveredStable), input.text);
+    assert.deepEqual(replayAttachments(recoveredStable), replayAttachments(stable));
+
     await fs.writeFile(file, body.replace("Windows", "Changed"), "utf8");
     assert.equal(await verifyPastedTxtBeforeSend(stable, home), false);
   });
