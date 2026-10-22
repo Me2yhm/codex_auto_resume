@@ -303,7 +303,6 @@ test("unknown explicit pasted metadata and malformed official blocks still fail 
       "/Pasted text.txt\nRun plan",
     "# Attached files:\n\n- /home/test/.codex/attachments/" + ID +
       "/Pasted text.txt\n\n## My request:\nRun plan\n",
-    "# Files pasted by the user:\n\n## \"plan\": /tmp/outside.txt\n\n## My request:\nRun",
     "# Files pasted by the user:\n\n## \"plan\": /tmp/other.pdf\n\n## My request:\nRun",
     "# Files pasted by the user:\n\n## Unknown heading:\nRun",
     "# Files pasted by the user:\n", // Truncated/incomplete section
@@ -313,6 +312,15 @@ test("unknown explicit pasted metadata and malformed official blocks still fail 
     assert.equal(first.action, "needs_review");
     assert.equal(replayText(first), undefined);
   }
+});
+
+test("a syntactically valid but outside TXT is blocked as unsafe, not malformed", async () => {
+  const plan = await materializePastedTxt(classify(
+    "# Files pasted by the user:\n\n## \"plan\": /tmp/outside.txt\n\n## My request:\nRun",
+  ));
+  assert.equal(plan.reason, "attachment_unsafe_reference");
+  assert.equal(plan.action, "needs_review");
+  assert.equal(replayText(plan), undefined);
 });
 
 test("old invalid_reference from an ordinary IDE path can reclassify after install", async () => {
