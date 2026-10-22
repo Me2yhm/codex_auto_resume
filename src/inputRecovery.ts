@@ -97,9 +97,11 @@ function itemHasProgress(item: unknown): boolean {
     (Array.isArray(item.changes) && item.changes.length > 0);
 }
 
-/** Lifecycle progress is only conclusive for one unambiguous input, not steering. */
+/** Lifecycle progress is conclusive only with unambiguous input handling.
+ * A fully answered and acknowledged structured question is not new steering. */
 export function hasUnambiguousInputProgress(turn: CodexTurn): boolean {
   if (!hasRecordedProgress(turn) || !Array.isArray(turn.items)) return false;
+  if (answeredQuestionFollowedByWork(turn)) return true;
   const users = turn.items.filter(item => record(item) && item.type === "userMessage");
   return users.length === 1 && turn.items[0] === users[0] && !waitingOnQuestion(turn.items) &&
     turn.items.every(item => record(item) && (item.type === "userMessage" || PROGRESS.has(String(item.type))));
