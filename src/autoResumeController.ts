@@ -382,7 +382,9 @@ export class AutoResumeController implements vscode.Disposable {
         replayAttempts: 0, replaySourceTurnId: undefined, replayTurnId: undefined,
       } : {}),
       recoveryPlan: plan,
-      ...(plan.action === "continue" && plan.reason === "recorded_execution_after_input" ? { replayAttempts: 0 } : {}),
+      ...(plan.action === "continue" &&
+        ["recorded_execution_after_input", "answered_question_followed_by_execution"].includes(plan.reason)
+        ? { replayAttempts: 0 } : {}),
     };
     const previous = current.recoveryPlan;
     if (changedSource || previous?.fingerprint !== plan.fingerprint || previous.action !== plan.action) {
