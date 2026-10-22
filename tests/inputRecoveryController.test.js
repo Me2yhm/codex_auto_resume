@@ -462,3 +462,21 @@ test('reloading with a pinned TXT snapshot refuses a missing original, without s
   next.setQuota(quota()); next.advance(); await next.tick(); next.advance(); await next.tick();
   assert.equal(next.sent.length, 0);
 });
+
+
+function answeredQuestionTurn() {
+  const source = turn('confirmed-answer');
+  const tag = 'send_user_' + 'message_question_reply';
+  const reply = [{ questionItemId: JSON.stringify(['request_user_input_async', 'call_example', 0]),
+    question: 'Where is the review evidence?', answer: '/tmp/fixture.zip' }];
+  source.items = [
+    user('initial-task', 'Read and finish the offline review.'),
+    { type: 'agentMessage', id: 'question', text: 'Where is the evidence?',
+      questions: [{ id: 'q1' }], status: 'completed' },
+    { type: 'dynamicToolCall', id: 'call_example', tool: 'request_user_input_async', status: 'completed' },
+    user('question-answer', '<' + tag + '>\n' + JSON.stringify(reply) + '\n</' + tag + '>\n'),
+    { type: 'agentMessage', id: 'received', text: 'I received the path and will continue.' },
+    { type: 'commandExecution', id: 'work', status: 'completed' },
+  ];
+  return source;
+}
