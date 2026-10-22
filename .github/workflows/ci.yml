@@ -7,7 +7,11 @@ on:
 
 jobs:
   typecheck-and-package:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,8 +21,10 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
-      - run: npx --yes @vscode/vsce@3.6.0 package --readme-path README.extension.md --out codex-auto-resume.vsix
-      - uses: actions/upload-artifact@v4
+      - if: runner.os == 'Linux'
+        run: npx --yes @vscode/vsce@3.6.0 package --readme-path README.extension.md --out codex-auto-resume.vsix
+      - if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
         with:
           name: codex-auto-resume-vsix
           path: codex-auto-resume.vsix
