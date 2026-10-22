@@ -202,3 +202,94 @@ for (const placeholder of [
     assert.equal(plan.reason, 'incomplete_activity_evidence');
   });
 }
+
+
+function structuredAnswer(id = 'call_example', answer = '/tmp/synthetic-evidence.zip') {
+  const token = 'send_user_' + 'message_question_reply';
+  const payload = [{ questionItemId: JSON.stringify(['request_user_input_async', id, 0]),
+    question: 'Where is the evidence archive?', answer }];
+  return user('answered-question', '<' + token + '>\n' + JSON.stringify(payload) +
+    '\n</' + token + '>\n');
+}
+function answeredTurn(overrides = {}) {
+  const items = [
+    user('original-request', 'Please verify the plan without production changes.'),
+    { type: 'agentMessage', id: 'question', text: 'Where is the evidence?',
+      questions: [{ id: 'Q-001' }], status: 'completed' },
+    { type: 'dynamicToolCall', id: 'call_example', tool: 'request_user_input_async', status: 'completed' },
+    structuredAnswer(),
+    { type: 'agentMessage', id: 'ack', text: 'Evidence path received; continuing checks.' },
+    { type: 'commandExecution', id: 'subsequent-work', status: 'completed', command: 'verify-fixture' },
+  ];
+  return failed('answered-quota-failed', overrides.items ?? items);
+}
+
+test('realistic original task + resolved Q&A + resumed execution is continue, not another task', () => {
+  const h = history(answeredTurn());
+  const plan = classify(h);
+  assert.equal(plan.action, 'continue');
+  assert.equal(plan.candidate, 'continue');
+  assert.equal(plan.reason, 'answered_question_followed_by_execution');
+  assert.deepEqual(plan.inputs.map(x => x.messageId), ['original-request', 'answered-question']);
+  assert.equal(replayText(plan), undefined);
+});
+
+test('historic questions and stale inProgress question tool do not block acknowledged reply', () => {
+  const t = answeredTurn();
+  t.items[2].status = 'inProgress';
+  const result = classify(history(t));
+  assert.equal(result.action, 'continue');
+});
+
+test('unacknowledged answer remains unresolved even if an older command completed', () => {
+  const t = answeredTurn();
+  t.items.splice(4, 2);
+  t.items.push({ type: 'commandExecution', id: 'old-command', status: 'completed' });
+  const result = classify(history(t));
+  assert.equal(result.action, 'needs_review');
+  assert.equal(result.reason, 'multiple_unresolved_inputs');
+});
+
+test('unstructured steer after old work is not silently dropped', () => {
+  const t = failed('steer', [user('task'), { type: 'agentMessage', id: 'before', text: 'Old work' },
+    user('new-user-instruction', 'Cancel the old task and switch projects.'),
+    { type: 'agentMessage', id: 'after', text: 'Acknowledged.' }]);
+  assert.equal(classify(history(t)).reason, 'multiple_unresolved_inputs');
+});
+
+test('a second unanswered question or unrelated pending approval prevents continue', () => {
+  const pendingNewQuestion = answeredTurn();
+  pendingNewQuestion.items.push({ type: 'agentMessage', id: 'new-q', text: 'Approve another step?',
+    questions: [{ id: 'Q-002' }] });
+  assert.equal(classify(history(pendingNewQuestion)).action, 'needs_review');
+  const pendingPermission = answeredTurn();
+  pendingPermission.items[2] = { type: 'dynamicToolCall', id: 'approval',
+    tool: 'request_approval', status: 'inProgress' };
+  assert.equal(classify(history(pendingPermission)).action, 'needs_review');
+});
+
+test('a question reply cannot authorize an unrelated still-pending question', () => {
+  const t = answeredTurn();
+  t.items[2] = { type: 'dynamicToolCall', id: 'call_unrelated',
+    tool: 'request_user_input_async', status: 'inProgress' };
+  assert.equal(classify(history(t)).action, 'needs_review');
+});
+
+test('separate consecutive rejected turns still retain every independent input', () => {
+  const t = answeredTurn();
+  const later = failed('later-rejected', [user('fresh-task', 'New requirements without execution')]);
+  const plan = classify(history(later, t));
+  assert.equal(plan.action, 'needs_review');
+  assert.equal(plan.reason, 'user_only_history_requires_review');
+  assert.deepEqual(plan.inputs.map(x => x.messageId), ['fresh-task']);
+});
+
+test('answer-only user turn with prior question and new agent response also continues', () => {
+  const t = failed('reply-only', [
+    { type: 'agentMessage', id: 'question', text: 'Where is it?',
+      questions: [{ id: 'Q-001' }] },
+    structuredAnswer(), { type: 'agentMessage', id: 'confirmation', text: 'Received.' },
+  ]);
+  const plan = classify(history(t));
+  assert.equal(plan.action, 'continue');
+});
