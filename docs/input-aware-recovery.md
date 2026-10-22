@@ -127,6 +127,16 @@ CI [Actions #39733388480](https://github.com/Me2yhm/codex_auto_resume/actions/ru
 
 The repaired path and diagnostics have not yet been confirmed in the user's actual Windows VS Code host after installing this build. Do not re-send an already manually continued task; wait for another naturally occurring quota-failed input for E2E. Existing anti-duplicate and user approval fences remain enforced.
 
+## Repeat quota exhaustion after an automatic input replay (2026-10-22)
+
+A Windows Local review-build recovery successfully **replayed the original task and its separate TXT attachment**, and the second turn performed real Codex work (assistant messages, commands, reasoning and file changes) before hitting the 5h limit again. The history then contained two quota-failed turns in the **same** conversation, each with an identical serialized user input. The old classifier treated them as two independent unresolved inputs (`multiple_unresolved_inputs`) when the persisted replay-source association was absent, blocking the **next** normal continuation. This is not an attachment-read or user-only policy failure.
+
+The repaired classifier accepts this narrow, positively evidenced case: the **newest** quota-failed turn must contain exactly one original user input first, have unambiguous execution progress and no pending question/approval; every older pending quota-failed turn must be **user-only** and contain the **exact same** structured input content. The plan retains both historical inputs for inspectability but selects `action=continue`, `reason=replayed_input_followed_by_execution`. No TXT bytes are sent again and the old replay-attempt budget resets only after proven execution. The existing durable dispatch fence and 10-second independent quota confirmation remain unchanged.
+
+Different prompts, new steering, unanswered questions/permissions, malformed/unknown activity, earlier non-user-only failures and identical **but still unexecuted** retries stay on the review or established safe paths. The classifier does not silently discard independent user instructions. This also works when a VS Code restart or lost UI receipt means `replaySourceTurnId` is no longer available.
+
+[GitHub Actions #39739232124](https://github.com/Me2yhm/codex_auto_resume/actions/runs/39739232124) PASS: Linux full tests **303 pass, 0 fail, 1 Windows-specific skipped**; targeted Windows tests **147 pass, 0 fail**; both TS checks and VSIX packaging passed. The actual user's *next* Windows quota recovery with the new build remains an E2E check. Avoid manually replaying the entire plan, which is already running or was partially executed.
+
 ## Required real-environment review
 
 Install only a review VSIX in a non-critical workspace initially. Keep `userOnlyPolicy=review`. Use `Inspect Recovery Input` for the three actual sample classes, verify original input completeness locally with `Review Recovery Input`, and confirm the official installed extension version. A real replay into the same conversation, new input during an Armed wait, reload persistence and a second quota exhaustion must be checked before broad release. Avoid manufacturing quota exhaustion or changing existing active task permissions.
