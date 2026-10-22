@@ -95,7 +95,7 @@ The current implementation now:
 
 Automated validation: [GitHub Actions #184](https://github.com/Me2yhm/codex_auto_resume/actions/runs/39137048037) PASS — `npm ci`, `npm run check`, **271/271 tests**, VSIX packaging and artifact upload. The uploaded artifact is `codex-auto-resume-vsix` (artifact ID `12139573822`, SHA-256 `0c0f850cda49d7d255da63f815a18b229eb8a6c6362818047507f07c43136d93`).
 
-**Not yet verified live:** the new native attachment IPC payload has not yet been exercised in the user's Remote workspace after this patch. Deterministic tests verify the exact payload shape and fail-closed version gate, but do not prove the installed UI renders the attachment card or that the model reads the entire 40,224-byte plan. Keep PR #4 Draft until that live test passes.
+**Native TXT live test:** the user confirmed a real Remote quota-reset replay delivered the pasted TXT as a separate attachment with the original request body preserved. This validates attachment transport on that installed version, not all future Codex builds. The later answered-question continuation regression has been repaired separately and still awaits a natural Remote E2E after this fix; keep PR #4 Draft pending review.
 
 ## Native TXT attachment transport follow-up (2026-10-18)
 
