@@ -3,6 +3,7 @@ import { constants as fileConstants, promises as fs } from "fs";
 import * as os from "os";
 import * as path from "path";
 import { TextDecoder } from "util";
+import { realPastedTxtIsConfined, resolveOfficialPastedTxtPath } from "./pastedTxtPath";
 import {
   MAX_INPUT_BYTES, originalReplayText, pastedTxtReferences, replayText, replayAttachments,
   type AttachmentIntegrity, type PastedTxtSnapshot, type RecoveryPlan,
@@ -27,27 +28,32 @@ function codexAttachmentRoot(override?: string): string {
 
 /** Prevent absolute-file and symlink escapes even if the input is malicious. */
 async function readOfficialPastedTxt(sourcePath: string, label: string, root: string): Promise<PastedTxtSnapshot> {
-  if (!path.isAbsolute(sourcePath) || path.resolve(sourcePath) !== sourcePath) {
-    throw new AttachmentReadError("unsafe_reference");
-  }
-  const relative = path.relative(root, sourcePath);
-  const parts = relative.split(path.sep);
-  if (parts.length !== 2 || !/^[a-f0-9-]{32,36}$/i.test(parts[0]) ||
-      !/\.txt$/i.test(parts[1]) || !parts[1].trim()) {
-    throw new AttachmentReadError("unsafe_reference");
-  }
+  const safePath = resolveOfficialPastedTxtPath(sourcePath, root);
+  if (!safePath) throw new AttachmentReadError("unsafe_reference");
+  // The official Windows serializer may mix \\ and / separators. File IO
+  // operates on the normalized host path, while the saved input and UI
+  // attachment metadata preserve the exact original sourcePath string.
+  const filePath = safePath.filesystemPath;
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
     const actualRoot = await fs.realpath(root);
-    const actualPath = await fs.realpath(sourcePath);
-    if (!actualPath.startsWith(actualRoot + path.sep)) throw new AttachmentReadError("unsafe_reference");
-    const file = await fs.lstat(sourcePath);
+    // Reject a session-directory symlink, even when it happens to point
+    // somewhere else beneath the root.
+    const directory = await fs.lstat(safePath.sessionDirectory);
+    if (!directory.isDirectory() || directory.isSymbolicLink()) {
+      throw new AttachmentReadError("unsafe_reference");
+    }
+    const file = await fs.lstat(filePath);
     if (!file.isFile() || file.isSymbolicLink()) throw new AttachmentReadError("unsafe_reference");
+    const actualPath = await fs.realpath(filePath);
+    if (!realPastedTxtIsConfined(actualRoot, actualPath, safePath.sessionId)) {
+      throw new AttachmentReadError("unsafe_reference");
+    }
     if (file.size > MAX_PASTED_TXT_BYTES) throw new AttachmentReadError("too_large");
     if (file.size === 0) throw new AttachmentReadError("missing");
     const openFlags = fileConstants.O_RDONLY |
       (process.platform === "win32" ? 0 : (fileConstants.O_NOFOLLOW ?? 0));
-    handle = await fs.open(sourcePath, openFlags);
+    handle = await fs.open(filePath, openFlags);
     const before = await handle.stat();
     if (!before.isFile() || before.size > MAX_PASTED_TXT_BYTES) throw new AttachmentReadError("too_large");
     const bytes = await handle.readFile();
