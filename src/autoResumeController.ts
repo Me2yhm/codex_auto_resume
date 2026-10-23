@@ -1,5 +1,11 @@
 import * as path from "path";
 import * as vscode from "vscode";
+import {
+  classifyRecoveryHistory, hasUnambiguousInputProgress, isQuotaFailure, recoveryDiagnostic,
+  RecoveryPlan, replayText, replayAttachments, UserOnlyPolicy, matchesReplayedInput,
+} from "./inputRecovery";
+import { readRecoveryHistory } from "./recoveryHistory";
+import { materializePastedTxt, verifyPastedTxtBeforeSend } from "./recoveryAttachments";
 import { classifyQuotaAvailability } from "./quotaAvailability";
 import { RecoveryCoordinator } from "./recoveryCoordination";
 import { isPrimerThread } from "./primerIdentity";
@@ -8,6 +14,7 @@ import { claimWorkResume, readWorkResumeDispatch } from "./workRecoveryDispatch"
 import { CodexRpcClient } from "./codexRpcClient";
 import { resolveCodexExecutable } from "./codexLocator";
 import { sendTurnThroughOfficialCodexUi } from "./officialCodexUi";
+import { CodexUiIpcRequestError, type CodexTurnStartOverrides } from "./codexUiIpc";
 import { QUOTA_PRIMER_STATE_KEY, QuotaPrimerState } from "./quotaPrimerState";
 import { addTextToOfficialCodexThread, tryNativeChatSubmit } from "./officialCodexBridge";
 import {
@@ -23,6 +30,18 @@ import {
 
 const STATE_KEY = "codexAutoResume.armed";
 const PENDING_QUOTA_CANDIDATE_KEY = "codexAutoResume.pendingQuotaCandidate";
+const RECOVERY_DECISIONS_KEY = "codexAutoResume.recoveryDecisionHistory";
+const MAX_RECOVERY_DECISIONS = 32;
+
+interface RecoveryDecisionRecord {
+  observedAtMs: number;
+  threadId: string;
+  sourceTurnId: string;
+  action: "continue" | "replay_input" | "needs_review";
+  reason: string;
+  preservedInputs: number;
+  fingerprint: string;
+}
 const RESUME_OBSERVATION_POLL_MS = 1_000;
 const AVAILABILITY_CONFIRMATION_MS = 10_000;
 const AVAILABILITY_CONFIRMATION_TIMEOUT_MS = 30_000;
@@ -38,6 +57,7 @@ class WorkContinuationPreflightCancelled extends Error {}
 export class AutoResumeController implements vscode.Disposable {
   private readonly recovery: RecoveryCoordinator;
   private coordinationUnavailable = false;
+  private reviewingInput = false;
   private client?: CodexRpcClient;
   private timer?: NodeJS.Timeout;
   private running = false;
@@ -132,20 +152,52 @@ export class AutoResumeController implements vscode.Disposable {
       return;
     }
     if (armed.resumeTurnId || armed.dispatchPending) {
+      const phase = armed.resumeTurnId ? "verifying a resumed turn" : "checking a pending dispatch";
+      const savedAction = armed.recoveryPlan?.action ?? "not yet classified";
       void vscode.window.showInformationMessage(
-        `Codex Auto Resume is verifying ${armed.resumeTurnId ? `resume turn ${armed.resumeTurnId}` : "a pending continuation"} on thread ${armed.threadId}. It will not send another continuation until this attempt is classified.`,
+        `Codex Auto Resume is ${phase} on thread ${armed.threadId}; saved recovery action: ${savedAction}. Review cannot replace an in-flight attempt. No duplicate will be sent. Use Inspect Recovery Input for details.`,
+      );
+      return;
+    }
+    if (this.inputRecoveryEnabled() && !armed.recoveryPlan) {
+      void vscode.window.showInformationMessage(
+        `Codex Auto Resume is Armed for thread ${armed.threadId} and classifying the failed input. No recovery action has been chosen; it will not send until classification completes.`,
+      );
+      return;
+    }
+    if (this.inputRecoveryEnabled() && armed.recoveryPlan?.action === "needs_review") {
+      const reason = armed.recoveryPlan.reason;
+      const detail = reason.startsWith("attachment_")
+        ? "TXT attachment safety/integrity check blocked replay. Inspect the recovery input and restore the original managed attachment; Review cannot bypass this block."
+        : "Run Review Recovery Input if the saved input is eligible.";
+      void vscode.window.showWarningMessage(
+        `Codex Auto Resume saved the recovery target ${armed.threadId}, but input handling needs review (${reason}). ${detail} No continuation will be sent while evidence is unresolved.`,
       );
       return;
     }
     const reset = new Date(armed.resetAtMs).toLocaleString();
+    const action = armed.recoveryPlan?.action === "replay_input" ? "replay the saved input verbatim" : "continue existing work";
     void vscode.window.showInformationMessage(
-      `Codex Auto Resume is ${this.availabilityCandidate ? "Confirming availability" : "Armed (awaiting availability)"} for thread ${armed.threadId}. Expected backend reset ${reset}; confirmed quota availability can resume earlier.`,
+      `Codex Auto Resume is ${this.availabilityCandidate ? "Confirming availability" : "Armed (awaiting availability)"} for thread ${armed.threadId}. Expected backend reset ${reset}; confirmed quota availability can resume earlier. Recovery action: ${action}.`,
     );
   }
 
   async resumeNow(): Promise<void> {
+    if (this.inputRecoveryEnabled() && this.armed()?.recoveryPlan?.action === "needs_review") {
+      await this.reviewRecoveryInput();
+      return;
+    }
     if (this.armed()?.resumeTurnId || this.armed()?.dispatchPending) {
       void vscode.window.showWarningMessage("A continuation is already being verified. Inspect the exact conversation before attempting another continuation.");
+      return;
+    }
+    if (this.inputRecoveryEnabled() && this.armed()) {
+      // In input-aware mode this command must not replace a queued answer with
+      // the generic prompt or bypass the independent quota confirmation.
+      await this.ensureClient();
+      const prepared = await this.prepareRecoveryInput(this.armed()!);
+      if (prepared?.recoveryPlan?.action === "needs_review") await this.reviewRecoveryInput();
+      else await this.tick();
       return;
     }
     await this.ensureClient();
@@ -212,7 +264,7 @@ export class AutoResumeController implements vscode.Disposable {
     const sent = await this.sendThroughOfficialUi(thread.id, prompt, "ui-ipc-test");
     if (!sent) {
       this.output.appendLine(
-        "[ui-ipc-test] NO OWNER: open the exact target conversation in the Codex sidebar, wait a few seconds, and run this test again.",
+        "[ui-ipc-test] NO OWNER: open the exact target conversation in the Codex sidebar, wait a few seconds, and run the UI IPC bridge test again.",
       );
       void vscode.window.showWarningMessage(
         "No Codex UI IPC owner was found for the target thread. Open the exact interrupted conversation in the Codex sidebar, wait 2-3 seconds, then run the UI IPC bridge test again.",
@@ -282,6 +334,195 @@ export class AutoResumeController implements vscode.Disposable {
     }
   }
 
+  private inputRecoveryEnabled(): boolean {
+    // Turning the feature off must not discard or bypass an already saved input.
+    return Boolean(this.armed()?.recoveryPlan) ||
+      vscode.workspace.getConfiguration("codexAutoResume").get<boolean>("inputRecovery.enabled", true);
+  }
+
+  private userOnlyPolicy(): UserOnlyPolicy {
+    return vscode.workspace.getConfiguration("codexAutoResume").get<string>("inputRecovery.userOnlyPolicy", "review") === "replayStableUserOnly"
+      ? "replayStableUserOnly" : "review";
+  }
+
+  private recoveryDecisionHistory(): RecoveryDecisionRecord[] {
+    const value = this.context.workspaceState.get<unknown>(RECOVERY_DECISIONS_KEY);
+    if (!Array.isArray(value)) return [];
+    return value.filter(item => item && typeof item.threadId === "string" &&
+      typeof item.reason === "string" && typeof item.action === "string")
+      .slice(-MAX_RECOVERY_DECISIONS) as RecoveryDecisionRecord[];
+  }
+
+  private async saveRecoveryDecision(threadId: string, plan: RecoveryPlan): Promise<void> {
+    const entry: RecoveryDecisionRecord = {
+      observedAtMs: Date.now(), threadId, sourceTurnId: plan.sourceTurnId,
+      action: plan.action, reason: plan.reason, preservedInputs: plan.inputs.length,
+      fingerprint: plan.fingerprint,
+    };
+    try {
+      await this.context.workspaceState.update(RECOVERY_DECISIONS_KEY,
+        [...this.recoveryDecisionHistory(), entry].slice(-MAX_RECOVERY_DECISIONS));
+    } catch {
+      this.output.appendLine("[auto-resume] decision history could not be stored");
+    }
+  }
+
+  private async prepareRecoveryInput(armed: ArmedResume): Promise<ArmedResume | undefined> {
+    if (!this.inputRecoveryEnabled() || armed.dispatchPending || armed.resumeTurnId) return armed;
+    const history = await readRecoveryHistory(this.client!, armed.threadId);
+    const current = this.armed();
+    if (!this.canMonitor() || !current || current.threadId !== armed.threadId ||
+        current.armedAtMs !== armed.armedAtMs || current.dispatchPending || current.resumeTurnId) return undefined;
+    const latest = history.complete ? history.turns[0] : undefined;
+    // User/native continuation already happened. Observe it, do not replay old input.
+    if (latest && ["completed", "inProgress"].includes(latest.status)) {
+      await this.trackResumeTurn(current, latest);
+      const tracked = this.armed();
+      if (tracked?.resumeTurnId) await this.checkTrackedResumeAttempt(tracked, null);
+      return undefined;
+    }
+    const changedSource = Boolean(latest && isQuotaFailure(latest) && latest.id !== current.interruptedTurnId);
+    const plan = await materializePastedTxt(classifyRecoveryHistory(history, {
+      nowMs: Date.now(), previous: current.recoveryPlan, policy: this.userOnlyPolicy(),
+      replayAttempts: changedSource ? 0 : current.replayAttempts,
+      replaySourceTurnId: latest?.id === current.replayTurnId ? current.replaySourceTurnId : undefined,
+    }), current.recoveryPlan);
+    const next: ArmedResume = {
+      ...current,
+      ...(changedSource && latest ? {
+        interruptedTurnId: latest.id, reason: latest.error!.codexErrorInfo as ArmedResume["reason"],
+        replayAttempts: 0, replaySourceTurnId: undefined, replayTurnId: undefined,
+      } : {}),
+      recoveryPlan: plan,
+      ...(plan.action === "continue" &&
+        ["recorded_execution_after_input", "answered_question_followed_by_execution",
+          "replayed_input_followed_by_execution"].includes(plan.reason)
+        ? { replayAttempts: 0 } : {}),
+    };
+    const previous = current.recoveryPlan;
+    if (changedSource || previous?.fingerprint !== plan.fingerprint || previous.action !== plan.action) {
+      this.availabilityCandidate = undefined;
+    }
+    await this.saveArmed(next);
+    if (previous?.fingerprint !== plan.fingerprint || previous.reason !== plan.reason || previous.action !== plan.action) {
+      await this.saveRecoveryDecision(next.threadId, plan);
+      this.output.appendLine(`[auto-resume] recovery action=${plan.action}; reason=${plan.reason}; sourceTurn=${plan.sourceTurnId || "<unavailable>"}; preservedInputs=${plan.inputs.length}`);
+    }
+    return this.armed();
+  }
+
+  /** Opens a local untitled diagnostic, never logs prompt text or executes a turn. */
+  async inspectRecoveryInput(): Promise<void> {
+    await this.ensureClient();
+    const armed = this.armed();
+    const threadId = armed?.threadId ?? (await this.findMostRecentThread())?.id;
+    if (!threadId) {
+      void vscode.window.showWarningMessage("No workspace work thread is available for input inspection.");
+      return;
+    }
+    const history = await readRecoveryHistory(this.client!, threadId);
+    const plan = await materializePastedTxt(classifyRecoveryHistory(history, {
+      nowMs: Date.now(), previous: armed?.recoveryPlan,
+      policy: this.userOnlyPolicy(), replayAttempts: armed?.replayAttempts,
+      replaySourceTurnId: history.turns[0]?.id === armed?.replayTurnId ? armed?.replaySourceTurnId : undefined,
+    }), armed?.recoveryPlan);
+    const report = {
+      threadId,
+      interpretation: "action/reason below are a fresh history classification using the effective user-only policy; persistedRecovery is the actual saved decision",
+      effectiveInputRecoveryEnabled: this.inputRecoveryEnabled(),
+      effectiveUserOnlyPolicy: this.userOnlyPolicy(),
+      extensionHostPlatform: process.platform,
+      remoteName: vscode.env?.remoteName ?? null,
+      autoResumeExtensionVersion: this.context.extension?.packageJSON?.version ?? "unknown",
+      ...recoveryDiagnostic(plan),
+      persistedRecovery: armed ? {
+        phase: armed.dispatchPending ? "dispatch_pending" : armed.resumeTurnId ? "verifying" : armed.recoveryPlan ? "armed" : "classifying",
+        interruptedTurnId: armed.interruptedTurnId,
+        action: armed.recoveryPlan?.action ?? null,
+        reason: armed.recoveryPlan?.reason ?? null,
+        sourceTurnId: armed.recoveryPlan?.sourceTurnId ?? null,
+        fingerprint: armed.recoveryPlan?.fingerprint ?? null,
+      } : null,
+      recentRecoveryDecisions: this.recoveryDecisionHistory().filter(entry => entry.threadId === threadId),
+      officialExtensionVersion: vscode.extensions?.getExtension("openai.chatgpt")?.packageJSON?.version ?? "unknown",
+    };
+    const document = await vscode.workspace.openTextDocument({ language: "json", content: JSON.stringify(report, null, 2) });
+    await vscode.window.showTextDocument(document, { preview: true });
+  }
+
+  /** An explicit per-input choice queues an action; it never bypasses quota guards. */
+  async reviewRecoveryInput(): Promise<void> {
+    if (this.reviewingInput) return;
+    if (!this.inputRecoveryEnabled()) {
+      void vscode.window.showWarningMessage("Enable input-aware recovery before reviewing a saved input.");
+      return;
+    }
+    this.reviewingInput = true;
+    try {
+      await this.ensureClient();
+      const armed = this.armed();
+      if (!armed) {
+        void vscode.window.showWarningMessage("There is no Armed recovery target in this extension host. Inspect the current conversation or confirm the Local/Remote host.");
+        return;
+      }
+      if (armed.resumeTurnId || armed.dispatchPending) {
+        const phase = armed.resumeTurnId ? "verifying a resumed turn" : "checking a pending dispatch";
+        void vscode.window.showWarningMessage(
+          `Recovery on thread ${armed.threadId} is ${phase}; it cannot be replaced by Review. Use Inspect Recovery Input to see persistedRecovery and the saved action.`,
+        );
+        return;
+      }
+      const prepared = await this.prepareRecoveryInput(armed);
+      const plan = prepared?.recoveryPlan;
+      if (!plan) return;
+      const document = await vscode.workspace.openTextDocument({ language: "json", content: JSON.stringify({
+        note: "LOCAL INPUT PREVIEW. This untitled document contains user input. Do not upload it without reviewing it for secrets. Edits here do not change the saved input.",
+        threadId: armed.threadId, action: plan.action, reason: plan.reason, inputs: plan.inputs,
+        pastedTxtAttachment: plan.attachmentIntegrity ?? null,
+        attachmentSha256: plan.pastedTxtSnapshots?.map(item => item.sha256) ?? [],
+        noteOnTxt: "Verified TXT content is retained and sent as a separate native UI attachment; the original prompt remains unchanged.",
+      }, null, 2) });
+      await vscode.window.showTextDocument(document, { preview: true });
+      if (plan.stale || plan.candidate !== "replay_input" || replayText(plan) === undefined) {
+        const detail = plan.reason.startsWith("attachment_")
+          ? `TXT attachment is blocked by ${plan.reason}; fix or restore the original file in the same host. Review cannot waive attachment integrity checks.`
+          : "The input is incomplete, unsupported, multiple, oversized, or already executing; review cannot safely replay it.";
+        void vscode.window.showWarningMessage(`${detail} Nothing was sent.`);
+        return;
+      }
+      const replay = "Replay saved input after quota recovery";
+      const proceed = "Continue existing work after quota recovery";
+      const choice = await vscode.window.showWarningMessage(
+        "Full history contains one user input but cannot prove whether it started. Choose only after checking the original conversation. This queues one exact action, not additional execution permissions.",
+        { modal: true }, replay, proceed,
+      );
+      if (choice !== replay && choice !== proceed) return;
+      const fresh = await readRecoveryHistory(this.client!, armed.threadId);
+      const check = await materializePastedTxt(classifyRecoveryHistory(fresh, { nowMs: Date.now(), previous: plan,
+        replaySourceTurnId: fresh.turns[0]?.id === prepared?.replayTurnId ? prepared?.replaySourceTurnId : undefined,
+      }), plan);
+      const current = this.armed();
+      if (!this.canMonitor() || !current || current.armedAtMs !== armed.armedAtMs ||
+          current.threadId !== armed.threadId || current.dispatchPending || current.resumeTurnId ||
+          !fresh.complete || check.fingerprint !== plan.fingerprint || check.candidate !== "replay_input" ||
+          check.stale || replayText(check) === undefined ||
+          current.recoveryPlan?.fingerprint !== plan.fingerprint) {
+        void vscode.window.showWarningMessage("Recovery changed while the dialog was open. The stale choice was not applied; review the latest input.");
+        return;
+      }
+      const action = choice === replay ? "replay_input" as const : "continue" as const;
+      const approved: RecoveryPlan = { ...check, action, reason: "user_confirmed_action",
+        approval: { action, fingerprint: check.fingerprint } };
+      await this.saveArmed({ ...current, recoveryPlan: approved, replayAttempts: 0 });
+      await this.saveRecoveryDecision(current.threadId, approved);
+      this.availabilityCandidate = undefined;
+      this.renderStatus();
+      void vscode.window.showInformationMessage(`Saved recovery action: ${action}. Two fresh available-quota reads are still required; nothing was sent by this command.`);
+    } finally {
+      this.reviewingInput = false;
+    }
+  }
+
   private resumePrompt(): string {
     return vscode.workspace.getConfiguration("codexAutoResume").get<string>(
       "resumePrompt",
@@ -332,7 +573,8 @@ export class AutoResumeController implements vscode.Disposable {
         this.availabilityCandidate = undefined;
         await this.checkPendingDispatch(armed);
       } else if (armed) {
-        await this.checkAvailabilityForResume(armed, limits);
+        const prepared = await this.prepareRecoveryInput(armed);
+        if (prepared) await this.checkAvailabilityForResume(prepared, limits);
       } else {
         const pending = this.pendingQuotaCandidate();
         if (pending) {
@@ -495,6 +737,10 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   private async checkAvailabilityForResume(armed: ArmedResume, limits: RateLimitSnapshot | null): Promise<void> {
+    if (this.inputRecoveryEnabled() && (!armed.recoveryPlan || armed.recoveryPlan.action === "needs_review")) {
+      this.availabilityCandidate = undefined;
+      return;
+    }
     if (!this.quotaLooksAvailable(limits)) {
       if (this.availabilityCandidate) this.output.appendLine("[auto-resume] confirmation failed; quota is blocked, unknown, or contradictory");
       this.availabilityCandidate = undefined;
@@ -523,6 +769,15 @@ export class AutoResumeController implements vscode.Disposable {
   private async tryAutomaticResume(armed: ArmedResume): Promise<void> {
     const current = this.armed();
     if (!this.canMonitor() || !current || current.dispatchPending || current.resumeTurnId) return;
+    if (this.inputRecoveryEnabled() && (!current.recoveryPlan || current.recoveryPlan.action === "needs_review")) return;
+    const savedInput = current.recoveryPlan?.action === "replay_input" ? replayText(current.recoveryPlan) : undefined;
+    if (current.recoveryPlan?.action === "replay_input" && savedInput === undefined) return;
+    const pastedTxtAttachments = savedInput !== undefined && current.recoveryPlan?.action === "replay_input"
+      ? replayAttachments(current.recoveryPlan) : undefined;
+    if (savedInput !== undefined && pastedTxtAttachments === undefined) return;
+    const uiOverrides: CodexTurnStartOverrides = pastedTxtAttachments && pastedTxtAttachments.length > 0
+      ? { attachments: pastedTxtAttachments } : {};
+    const prompt = savedInput ?? this.resumePrompt();
     const before = await this.latestTurn(armed.threadId);
     if (!before) return; // An unreadable history cannot prove a safe dispatch baseline.
     if (before.status === "completed" || before.status === "inProgress" ||
@@ -548,6 +803,8 @@ export class AutoResumeController implements vscode.Disposable {
     });
     const pending: ArmedResume = {
       ...armed,
+      replayAttempts: savedInput !== undefined && claim.status === "claimed"
+        ? (armed.replayAttempts ?? 0) + 1 : armed.replayAttempts,
       dispatchPending: { beforeTurnId: claim.record.beforeTurnId, sentAtMs: claim.record.sentAtMs, hostClaimToken: claim.record.token },
     };
     // Both the host claim and workspace intent precede transport. Other
@@ -567,9 +824,14 @@ export class AutoResumeController implements vscode.Disposable {
       this.output.appendLine(`[auto-resume] adopting the same-host pending continuation for ${armed.threadId}; no duplicate will be sent`);
       return;
     }
+    if (uiOverrides.attachments?.length) {
+      this.output.appendLine(
+        `[auto-resume] replaying original input with ${uiOverrides.attachments.length} verified pasted TXT attachment(s) through official UI context; prompt body unchanged`,
+      );
+    }
     let sent: boolean;
     try {
-      sent = await this.sendThroughOfficialUi(armed.threadId, this.resumePrompt(), "auto-resume", async () => {
+      sent = await this.sendThroughOfficialUi(armed.threadId, prompt, "auto-resume", async () => {
         // Owner discovery and editor mounting are asynchronous. The user may
         // disable Auto Resume or manually continue the exact conversation while
         // we are finding the official writer. Recheck immediately before IPC
@@ -581,20 +843,65 @@ export class AutoResumeController implements vscode.Disposable {
             currentAttempt.dispatchPending.beforeTurnId !== before.id) {
           throw new WorkContinuationPreflightCancelled("recovery state changed during owner discovery");
         }
-        const latest = await this.latestTurn(armed.threadId);
+        // A read failing inside this guard is known-unsent, not ambiguous IPC delivery.
+        let latest: CodexTurn | undefined;
+        try {
+          latest = await this.latestTurn(armed.threadId);
+          if (this.inputRecoveryEnabled()) {
+            const history = await readRecoveryHistory(this.client!, armed.threadId);
+            const checked = await materializePastedTxt(classifyRecoveryHistory(history, {
+              nowMs: Date.now(), previous: armed.recoveryPlan, policy: this.userOnlyPolicy(),
+              replayAttempts: armed.replayAttempts,
+              replaySourceTurnId: history.turns[0]?.id === armed.replayTurnId ? armed.replaySourceTurnId : undefined,
+            }), armed.recoveryPlan);
+            if (!history.complete || checked.stale || checked.fingerprint !== armed.recoveryPlan?.fingerprint ||
+                checked.action !== armed.recoveryPlan.action || checked.action === "needs_review" ||
+                (checked.action === "replay_input" && (
+                  replayText(checked) !== prompt ||
+                  !await verifyPastedTxtBeforeSend(checked) ||
+                  JSON.stringify(replayAttachments(checked)) !== JSON.stringify(pastedTxtAttachments)))) {
+              throw new Error("recovery evidence changed");
+            }
+          }
+        } catch {
+          throw new WorkContinuationPreflightCancelled("input evidence changed or became unavailable before delivery");
+        }
         if (!this.canMonitor() || this.armed()?.dispatchPending?.hostClaimToken !== claim.record.token ||
             !latest || latest.id !== before.id ||
             (latest.status !== "failed" && latest.status !== "interrupted")) {
           throw new WorkContinuationPreflightCancelled("work conversation changed during owner discovery");
         }
-      });
+      }, uiOverrides);
     } catch (error) {
+      // Unsupported/invalid attachment metadata is rejected before the IPC
+      // start-turn request; release only this definitely-unsent claim and keep
+      // the saved input for manual handling instead of retrying every poll.
+      if (error instanceof CodexUiIpcRequestError &&
+          ["pasted-text-attachments-unsupported", "invalid-pasted-text-attachment"].includes(error.code)) {
+        await claim.releaseUnsent();
+        if (this.canMonitor() && this.armed()?.dispatchPending?.hostClaimToken === claim.record.token) {
+          const oldPlan = pending.recoveryPlan;
+          await this.saveArmed({
+            ...pending,
+            recoveryPlan: oldPlan ? {
+              ...oldPlan, action: "needs_review",
+              reason: error.code === "pasted-text-attachments-unsupported"
+                ? "pasted_txt_attachment_protocol_unsupported" : "pasted_txt_attachment_metadata_invalid",
+              approval: undefined, stale: true,
+            } : oldPlan,
+            replayAttempts: armed.replayAttempts,
+            dispatchPending: undefined,
+          });
+        }
+        this.output.appendLine(`[auto-resume] blocked TXT attachment replay for ${armed.threadId}: ${error.code}; saved input remains for review`);
+        return;
+      }
       // A failed pre-send guard proves startTurn was never called. Other IPC
       // exceptions are ambiguous and must retain the durable dispatch claim.
       if (!(error instanceof WorkContinuationPreflightCancelled)) throw error;
       await claim.releaseUnsent();
       if (this.canMonitor() && this.armed()?.dispatchPending?.hostClaimToken === claim.record.token) {
-        await this.saveArmed({ ...pending, dispatchPending: undefined });
+        await this.saveArmed({ ...pending, replayAttempts: armed.replayAttempts, dispatchPending: undefined });
       }
       this.output.appendLine(`[auto-resume] cancelled unsent continuation for ${armed.threadId}: ${error.message}; no duplicate will be submitted without fresh confirmation`);
       return;
@@ -602,7 +909,7 @@ export class AutoResumeController implements vscode.Disposable {
     if (!sent) {
       await claim.releaseUnsent();
       if (this.canMonitor() && this.armed()?.dispatchPending?.sentAtMs === pending.dispatchPending!.sentAtMs) {
-        await this.saveArmed({ ...pending, dispatchPending: undefined });
+        await this.saveArmed({ ...pending, replayAttempts: armed.replayAttempts, dispatchPending: undefined });
       }
       this.output.appendLine(`[auto-resume] no active UI owner for ${armed.threadId}; keeping thread armed for a confirmed retry`);
       return;
@@ -643,8 +950,18 @@ export class AutoResumeController implements vscode.Disposable {
 
   private async trackResumeTurn(armed: ArmedResume, turn: CodexTurn): Promise<void> {
     if (!this.canMonitor() || this.armed()?.armedAtMs !== armed.armedAtMs) return;
+    let ownReplay = false;
+    if (this.inputRecoveryEnabled() && armed.dispatchPending && armed.recoveryPlan?.action === "replay_input") {
+      const history = await readRecoveryHistory(this.client!, armed.threadId);
+      const observed = history.turns.find(item => item.id === turn.id);
+      ownReplay = Boolean(history.complete && observed && matchesReplayedInput(observed, armed.recoveryPlan));
+      if (!this.canMonitor() || this.armed()?.armedAtMs !== armed.armedAtMs) return;
+    }
     await this.saveArmed({
       ...armed, dispatchPending: undefined, resumeTurnId: turn.id,
+      ...(ownReplay ? {
+        replaySourceTurnId: armed.recoveryPlan!.sourceTurnId, replayTurnId: turn.id,
+      } : {}),
       resumeStartedAtMs: Date.now(), resumeInProgressSinceMs: undefined,
     } satisfies ArmedResume);
     this.lastResumeObservation = undefined;
@@ -687,6 +1004,26 @@ export class AutoResumeController implements vscode.Disposable {
       return "pending";
     }
 
+    if (this.inputRecoveryEnabled() && ["completed", "interrupted", "failed"].includes(turn.status)) {
+      const latest = await this.latestTurn(armed.threadId);
+      if (!this.canMonitor() || this.armed()?.resumeTurnId !== resumeTurnId) return "pending";
+      if (latest && latest.id !== resumeTurnId && isQuotaFailure(latest)) {
+        // A new answer can fail while the preceding attempt is being verified.
+        // Retain this same conversation rather than disarm and rediscover an
+        // unrelated, more recently updated workspace conversation.
+        const next: ArmedResume = { ...armed, resumeTurnId: undefined,
+          resumeStartedAtMs: undefined, resumeInProgressSinceMs: undefined,
+          interruptedTurnId: latest.id, reason: latest.error!.codexErrorInfo as ArmedResume["reason"],
+          recoveryPlan: armed.recoveryPlan ? { ...armed.recoveryPlan, stale: true, approval: undefined,
+            action: "needs_review", reason: "new_input_after_verified_turn" } : undefined,
+          replayAttempts: 0, replaySourceTurnId: undefined, replayTurnId: undefined, dispatchPending: undefined,
+        };
+        await this.saveArmed(next);
+        await this.prepareRecoveryInput(next);
+        return "rearmed";
+      }
+    }
+
     const explicitReason = classifyLimitError(turn);
     if (explicitReason) {
       const reason = explicitReason ?? "rateLimitReached";
@@ -699,6 +1036,10 @@ export class AutoResumeController implements vscode.Disposable {
         resumeStartedAtMs: undefined,
         resumeInProgressSinceMs: undefined,
         interruptedTurnId: resumeTurnId,
+        recoveryPlan: armed.recoveryPlan ? { ...armed.recoveryPlan,
+          action: "needs_review", candidate: undefined, stale: true, approval: undefined,
+          reason: "reclassify_after_quota_failure",
+        } : undefined, // Retain saved input until fresh history replaces it.
         dispatchPending: undefined,
       };
       await this.saveArmed(rearmed);
@@ -718,6 +1059,15 @@ export class AutoResumeController implements vscode.Disposable {
       return "disarmed";
     }
 
+    if (turn.status === "inProgress" && this.inputRecoveryEnabled()) {
+      const history = await readRecoveryHistory(this.client!, armed.threadId);
+      if (!this.canMonitor() || this.armed()?.resumeTurnId !== resumeTurnId) return "pending";
+      const detailed = history.turns.find(item => item.id === resumeTurnId);
+      if (!history.complete || !detailed || !hasUnambiguousInputProgress(detailed)) {
+        if (armed.resumeInProgressSinceMs !== undefined) await this.saveArmed({ ...armed, resumeInProgressSinceMs: undefined });
+        return "pending"; // A lifecycle allocation is not execution evidence.
+      }
+    }
     const startedAtMs = armed.resumeInProgressSinceMs ?? Date.now();
     if (turn.status === "inProgress" && armed.resumeInProgressSinceMs === undefined) {
       await this.saveArmed({ ...armed, resumeInProgressSinceMs: startedAtMs });
@@ -756,8 +1106,9 @@ export class AutoResumeController implements vscode.Disposable {
     prompt: string,
     logPrefix: string,
     beforeStartTurn?: () => Promise<void>,
+    overrides: CodexTurnStartOverrides = {},
   ): Promise<boolean> {
-    return sendTurnThroughOfficialCodexUi(threadId, prompt, this.output, logPrefix, {}, beforeStartTurn);
+    return sendTurnThroughOfficialCodexUi(threadId, prompt, this.output, logPrefix, overrides, beforeStartTurn);
   }
 
   private scheduleNextTick(): void {
@@ -1064,6 +1415,7 @@ export class AutoResumeController implements vscode.Disposable {
   }
 
   private renderStatus(): void {
+    this.statusBar.command = "codexAutoResume.status";
     if (!this.enabled()) {
       this.statusBar.text = "$(circle-slash) Codex Resume: Off";
       this.statusBar.tooltip = "Codex Auto Resume is disabled";
@@ -1084,6 +1436,20 @@ export class AutoResumeController implements vscode.Disposable {
     if (armed.resumeTurnId || armed.dispatchPending) {
       this.statusBar.text = "$(sync) Codex Resume: Verifying";
       this.statusBar.tooltip = `Continuation ${armed.resumeTurnId ?? "dispatch pending"} is being verified; no duplicate continuation will be sent`;
+      return;
+    }
+    if (this.inputRecoveryEnabled() && !armed.recoveryPlan) {
+      this.statusBar.text = "$(sync) Codex Resume: Classifying";
+      this.statusBar.tooltip = "Quota-failed turn saved; examining complete input history. No recovery action is confirmed yet.";
+      return;
+    }
+    if (this.inputRecoveryEnabled() && armed.recoveryPlan?.action === "needs_review") {
+      const blocked = armed.recoveryPlan.reason.startsWith("attachment_");
+      this.statusBar.text = blocked ? "$(warning) Codex Resume: TXT Blocked" : "$(warning) Codex Resume: Review Input";
+      this.statusBar.tooltip = blocked
+        ? `TXT attachment could not be safely replayed (${armed.recoveryPlan.reason}). Click to inspect; Review cannot bypass integrity checks.`
+        : `Recovery is retained, not sent: ${armed.recoveryPlan.reason}. Click to review.`;
+      this.statusBar.command = blocked ? "codexAutoResume.inspectRecoveryInput" : "codexAutoResume.reviewRecoveryInput";
       return;
     }
     this.statusBar.text = this.availabilityCandidate

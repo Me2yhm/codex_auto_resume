@@ -7,7 +7,11 @@ on:
 
 jobs:
   typecheck-and-package:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,9 +20,26 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - run: npm test
-      - run: npx --yes @vscode/vsce@3.6.0 package --readme-path README.extension.md --out codex-auto-resume.vsix
-      - uses: actions/upload-artifact@v4
+      - if: runner.os == 'Linux'
+        run: npm test
+      # The full Windows suite currently has three pre-existing non-portable
+      # filesystem/lock-timing tests. Gate this change on the native Windows
+      # TXT and recovery tests until those independent issues are hardened.
+      - if: runner.os == 'Windows'
+        run: npm run compile
+      - if: runner.os == 'Windows'
+        run: >-
+          node --test
+          tests/pastedTxtPath.test.js
+          tests/recoveryAttachments.test.js
+          tests/inputRecovery.test.js
+          tests/inputRecoveryController.test.js
+          tests/autoResumeSafetyReview.test.js
+          tests/officialCodexUiRegression.test.js
+      - if: runner.os == 'Linux'
+        run: npx --yes @vscode/vsce@3.6.0 package --readme-path README.extension.md --out codex-auto-resume.vsix
+      - if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
         with:
           name: codex-auto-resume-vsix
           path: codex-auto-resume.vsix

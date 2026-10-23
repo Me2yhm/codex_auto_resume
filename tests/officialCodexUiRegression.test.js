@@ -27,7 +27,7 @@ async function transport(t, options = {}) {
   vscode.extensions = {
     getExtension(id) {
       assert.equal(id, "openai.chatgpt");
-      return { extensionPath: root, packageJSON: { main: "official-bundle.js", version: "fixture" } };
+      return { extensionPath: root, packageJSON: { main: "official-bundle.js", version: options.packageVersion ?? "fixture" } };
     },
   };
   if (options.commandError) {
@@ -238,4 +238,63 @@ test("ambiguous protocol versions fail closed before any IPC request", async (t)
   await assert.rejects(finishWithFakeTime(t, h.official.sendTurnThroughOfficialCodexUi(THREAD_ID, PROMPT, h.output, "auto-resume")), /Ambiguous Codex UI IPC versions/);
   assert.equal(h.frames.length, 0);
   assert.equal(h.sockets.length, 0);
+});
+
+
+test("verified Codex 26.1007.21434 start-turn v2 sends TXT as separate UI context attachments", async t => {
+  const h = await transport(t, {
+    packageVersion: "26.1007.21434",
+    bundleSource: '({"thread-owner-discovery":1,"thread-follower-start-turn":2})',
+  });
+  const prompt = '# Files pasted by the user:\n\n## "Optimizer plan": /home/test/.codex/attachments/0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3/Pasted text.txt\n\n## My request:\nPlease run the plan.\n';
+  const attachments = [{
+    label: "Optimizer plan",
+    path: "/home/test/.codex/attachments/0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3/Pasted text.txt",
+    fsPath: "/home/test/.codex/attachments/0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3/Pasted text.txt",
+    isPastedText: true,
+  }];
+  const sent = await finishWithFakeTime(t, h.official.sendTurnThroughOfficialCodexUi(
+    THREAD_ID, prompt, h.output, "auto-resume", { attachments },
+  ));
+  assert.equal(sent, true);
+  const start = followerFrame(h);
+  assert.equal(start.version, 2);
+  assert.equal(start.params.conversationId, THREAD_ID);
+  assert.equal(start.params.turnStart.request.threadId, THREAD_ID);
+  assert.deepEqual(start.params.turnStart.request.input, [{ type: "text", text: prompt, text_elements: [] }]);
+  assert.deepEqual(start.params.turnStart.context, { inheritThreadSettings: true, attachments });
+  assert.ok(!start.params.turnStart.request.input[0].text.includes("verified contents of pasted TXT"));
+  assert.ok(!start.params.turnStart.request.input[0].text.includes("plan body"));
+});
+
+test("unverified Codex version refuses native TXT attachment dispatch before touching UI or IPC", async t => {
+  const h = await transport(t, { packageVersion: "future-unverified-version" });
+  const attachments = [{
+    label: "plan",
+    path: "/home/test/.codex/attachments/0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3/Pasted text.txt",
+    fsPath: "/home/test/.codex/attachments/0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3/Pasted text.txt",
+    isPastedText: true,
+  }];
+  await assert.rejects(
+    h.official.sendTurnThroughOfficialCodexUi(THREAD_ID, PROMPT, h.output, "auto-resume", { attachments }),
+    error => error.code === "pasted-text-attachments-unsupported",
+  );
+  assert.equal(h.frames.length, 0);
+  assert.equal(h.sockets.length, 0);
+  assert.equal(h.vscode.executedCommands.length, 0);
+});
+
+test("direct IPC client rejects attachments unless the exact inspected UI protocol is enabled", async t => {
+  const h = await transport(t);
+  const client = new h.ipc.CodexUiIpcClient(h.output, "/mock/codex-ui.sock");
+  t.after(() => client.dispose());
+  await assert.rejects(client.startTurn(THREAD_ID, PROMPT, VERSIONS, OWNER_ID, {
+    attachments: [{
+      label: "plan",
+      path: "/home/test/.codex/attachments/0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3/Pasted text.txt",
+      fsPath: "/home/test/.codex/attachments/0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3/Pasted text.txt",
+      isPastedText: true,
+    }],
+  }), error => error.code === "pasted-text-attachments-unsupported");
+  assert.equal(h.frames.length, 0);
 });

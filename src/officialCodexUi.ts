@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import {
   CodexTurnStartOverrides,
   CodexUiIpcClient,
+  CodexUiIpcRequestError,
   readCodexUiIpcVersions,
 } from "./codexUiIpc";
 
@@ -13,9 +14,10 @@ export async function sendTurnThroughOfficialCodexUi(
   overrides: CodexTurnStartOverrides = {},
   beforeStartTurn?: () => Promise<void>,
 ): Promise<boolean> {
+  const versions = readCodexUiIpcVersions(output);
+  assertAttachmentProtocol(versions, overrides);
   await surfaceOfficialCodexThread(threadId, output, logPrefix);
 
-  const versions = readCodexUiIpcVersions(output);
   const ipc = new CodexUiIpcClient(output);
   try {
     await ipc.connect();
@@ -49,6 +51,7 @@ export async function trySendTurnThroughExistingOfficialOwner(
 
   try {
     const versions = readCodexUiIpcVersions(output);
+    assertAttachmentProtocol(versions, overrides);
     ipc = new CodexUiIpcClient(output);
     await ipc.connect();
     ownerClientId = await ipc.discoverOwner(threadId, versions.ownerDiscovery);
@@ -67,6 +70,15 @@ export async function trySendTurnThroughExistingOfficialOwner(
     return false;
   } finally {
     ipc?.dispose();
+  }
+}
+
+function assertAttachmentProtocol(
+  versions: ReturnType<typeof readCodexUiIpcVersions>,
+  overrides: CodexTurnStartOverrides,
+): void {
+  if (overrides.attachments?.length && versions.supportsPastedTextAttachments !== true) {
+    throw new CodexUiIpcRequestError("pasted-text-attachments-unsupported", "thread-follower-start-turn");
   }
 }
 
