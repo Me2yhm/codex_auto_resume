@@ -724,3 +724,54 @@ test("Remote G3 with a Codex attachment path in IDE open tabs replays exactly on
   h.advance(); await h.tick();
   assert.equal(h.sent.length, 1);
 });
+
+
+test('G4 context compaction reclassifies previous unknown-item Review and sends one default Continue', async t => {
+  const source = turn('g4-executed-and-failed', true);
+  source.items[0].content[0].text = '授权G4';
+  source.items.push(
+    { type: 'agentMessage', id: 'g4-ack', text: '已收到 G4 授权，继续核查。' },
+    { type: 'contextCompaction', id: 'compaction-automatically' },
+    { type: 'commandExecution', id: 'post-compaction', status: 'completed' },
+  );
+  const h = setup(t, { turns: [source], available: false });
+  const prior = {
+    version: 1, action: 'needs_review', reason: 'unknown_item_or_context_activity',
+    sourceTurnId: source.id, candidate: undefined, inputs: [],
+    fingerprint: 'old-missing-neutral-compaction-kind', evidence: [],
+    stableSinceMs: NOW - 30_000, observedAtMs: NOW - 10_000,
+    stale: false,
+  };
+  await h.context.workspaceState.update(KEY, { ...h.state(), recoveryPlan: prior });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'continue');
+  assert.equal(h.state().recoveryPlan.reason, 'recorded_execution_after_input');
+  assert.equal(h.state().recoveryPlan.inputs.length, 1);
+  await h.controller.showStatus();
+  assert.ok(h.vscode.messages.some(m => m.message.includes('continue existing work')));
+
+  // No send while the 5-hour quota is still blocked.
+  assert.equal(h.sent.length, 0);
+  h.setQuota(quota(true));
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 0);
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].threadId, THREAD);
+  assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
+  assert.deepEqual(h.sent[0].overrides, {});
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 1);
+});
+
+test('G4 with compaction but no real executed work remains held rather than replaying authorization', async t => {
+  const source = turn('g4-only-compaction');
+  source.items[0].content[0].text = '授权G4';
+  source.items.push({ type: 'contextCompaction', id: 'compacted' });
+  const h = setup(t, { turns: [source], policy: 'replayStableUserOnly' });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.reason, 'incomplete_activity_evidence');
+  h.advance(90_000); await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+  assert.equal(h.sent.length, 0);
+});
