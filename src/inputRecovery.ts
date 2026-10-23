@@ -70,6 +70,15 @@ const PROGRESS = new Set([
   "mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "subAgentActivity",
   "webSearch", "imageView", "imageGeneration",
 ]);
+// Automatic context compaction is a known Codex lifecycle event, neither a
+// new user instruction nor positive evidence that the user request executed.
+// Unknown item kinds must continue to fail closed.
+const NEUTRAL_CONTEXT = new Set(["contextCompaction"]);
+function knownHistoryItem(item: unknown): boolean {
+  return record(item) &&
+    (item.type === "userMessage" || PROGRESS.has(String(item.type)) ||
+      NEUTRAL_CONTEXT.has(String(item.type)));
+}
 
 export function isQuotaFailure(turn: CodexTurn): boolean {
   return (turn.status === "failed" || turn.status === "interrupted") &&
@@ -104,7 +113,7 @@ export function hasUnambiguousInputProgress(turn: CodexTurn): boolean {
   if (answeredQuestionFollowedByWork(turn)) return true;
   const users = turn.items.filter(item => record(item) && item.type === "userMessage");
   return users.length === 1 && turn.items[0] === users[0] && !waitingOnQuestion(turn.items) &&
-    turn.items.every(item => record(item) && (item.type === "userMessage" || PROGRESS.has(String(item.type))));
+    turn.items.every(knownHistoryItem);
 }
 
 /** Stable ordering prevents an object-key reorder being mistaken for an edit. */
@@ -379,7 +388,7 @@ export function classifyRecoveryHistory(
   }
   if (plan.inputs.length !== 1) return { ...plan, reason: "multiple_unresolved_inputs" };
   if (waitingOnQuestion(items)) return { ...plan, reason: "unanswered_question_or_approval" };
-  if (items.some(item => !record(item) || (item.type !== "userMessage" && !PROGRESS.has(String(item.type))))) {
+  if (items.some(item => !knownHistoryItem(item))) {
     return { ...plan, reason: "unknown_item_or_context_activity" };
   }
   const userIndex = items.findIndex(item => record(item) && item.type === "userMessage");
