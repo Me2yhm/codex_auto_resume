@@ -392,3 +392,101 @@ test('previous failed turn with executed work is not considered an identical quo
   const p = classify(history(later, earlier));
   assert.equal(p.action, 'continue');
 });
+
+
+test('G4: real work -> context compaction -> more work -> quota failure continues', () => {
+  const t = failed('G4-second-quota', [
+    user('g4', '授权G4'),
+    { type: 'agentMessage', id: 'ack', text: '收到 G4 授权。先检查实际数据。' },
+    { type: 'commandExecution', id: 'pre-compact', status: 'completed', command: 'inspect-data' },
+    { type: 'reasoning', id: 'thinking', summary: ['Work continues'], content: [] },
+    { type: 'contextCompaction', id: 'automatic-context-compaction' },
+    { type: 'commandExecution', id: 'post-compact', status: 'completed', command: 'validate-data' },
+  ]);
+  assert.equal(hasUnambiguousInputProgress(t), true);
+  const plan = classify(history(t), { policy: 'replayStableUserOnly' });
+  assert.equal(plan.action, 'continue');
+  assert.equal(plan.candidate, 'continue');
+  assert.equal(plan.reason, 'recorded_execution_after_input');
+  assert.equal(plan.inputs.length, 1);
+  assert.equal(plan.evidence[0].itemTypes.includes('contextCompaction'), true);
+  assert.equal(replayText(plan), '授权G4'); // Saved for review, not selected for replay.
+});
+
+test('compaction is neutral and is not proof that a quota-rejected input was processed', () => {
+  const h = history(failed('only-compaction', [
+    user('new-authorization', '授权G4'),
+    { type: 'contextCompaction', id: 'metadata-only' },
+  ]));
+  const first = classify(h, { policy: 'replayStableUserOnly' });
+  assert.equal(first.action, 'needs_review');
+  assert.equal(first.reason, 'incomplete_activity_evidence');
+  const after = classify(h, { policy: 'replayStableUserOnly',
+    nowMs: NOW + 60_000, previous: first });
+  assert.equal(after.action, 'needs_review');
+  assert.equal(after.reason, 'incomplete_activity_evidence');
+  assert.equal(hasUnambiguousInputProgress(h.turns[0]), false);
+});
+
+test('known compaction never permits a new pending approval or independent steer', () => {
+  for (const additional of [
+    [{ type: 'dynamicToolCall', id: 'ask', tool: 'request_user_input_async', status: 'inProgress' }],
+    [{ type: 'dynamicToolCall', id: 'grant', tool: 'request_permissions', status: 'inProgress' }],
+    [user('new-independent-instruction', 'Do a separate production action')],
+  ]) {
+    const t = failed('compacted-unsafe', [
+      user('work', '授权G4'),
+      { type: 'commandExecution', id: 'ran', status: 'completed' },
+      { type: 'contextCompaction', id: 'compacted' },
+      ...additional,
+    ]);
+    const plan = classify(history(t));
+    assert.equal(plan.action, 'needs_review');
+    assert.equal(hasUnambiguousInputProgress(t), false);
+  }
+});
+
+test('compaction does not make any other unknown activity safe to continue', () => {
+  const t = failed('unknown-after-compaction', [
+    user(), { type: 'commandExecution', id: 'cmd', status: 'completed' },
+    { type: 'contextCompaction', id: 'metadata' },
+    { type: 'unexpectedFutureEvent', id: 'unknown' },
+  ]);
+  const plan = classify(history(t));
+  assert.equal(plan.action, 'needs_review');
+  assert.equal(plan.reason, 'unknown_item_or_context_activity');
+  assert.equal(hasUnambiguousInputProgress(t), false);
+});
+
+test('compaction before the only user instruction cannot prove that instruction executed', () => {
+  const t = failed('compacted-before-g4', [
+    { type: 'contextCompaction', id: 'preceding' },
+    user('after-compaction', '授权G4'),
+    { type: 'commandExecution', id: 'may-be-old', status: 'completed' },
+  ]);
+  assert.equal(classify(history(t)).reason, 'ambiguous_steering_order');
+  assert.equal(hasUnambiguousInputProgress(t), false);
+});
+
+test('same input replayed and executed with compaction can continue on later quota failure', () => {
+  const first = failed('first-quiet-quota', [user('first', '授权G4')]);
+  const second = failed('second-ran-quota', [
+    user('replayed', '授权G4'), { type: 'commandExecution', id: 'work', status: 'completed' },
+    { type: 'contextCompaction', id: 'compress' },
+    { type: 'agentMessage', id: 'after-compress', text: '继续检查缺口。' },
+  ]);
+  const plan = classify(history(second, first), { policy: 'replayStableUserOnly' });
+  assert.equal(plan.action, 'continue');
+  assert.equal(plan.reason, 'replayed_input_followed_by_execution');
+  assert.equal(plan.inputs.length, 2);
+});
+
+test('answered question may cross compaction but still needs a real post-answer acknowledgement', () => {
+  const t = answeredTurn();
+  t.items.splice(4, 0, { type: 'contextCompaction', id: 'between-answer-and-acknowledgement' });
+  assert.equal(classify(history(t)).reason, 'answered_question_followed_by_execution');
+  const noAck = answeredTurn();
+  noAck.items.splice(4, 1, { type: 'contextCompaction', id: 'only-context' });
+  noAck.items.splice(5, 1); // Remove the command that followed the original acknowledgement.
+  assert.equal(classify(history(noAck)).action, 'needs_review');
+});
