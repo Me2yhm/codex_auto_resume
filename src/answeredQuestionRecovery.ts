@@ -2,7 +2,9 @@ import type { CodexTurn } from "./types";
 
 const KINDS = new Set(["agentMessage", "reasoning", "plan", "commandExecution",
   "fileChange", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall",
-  "subAgentActivity", "webSearch", "imageView", "imageGeneration"]);
+  "subAgentActivity", "webSearch", "imageView", "imageGeneration",
+  // Known lifecycle metadata; this is never counted as post-answer execution.
+  "contextCompaction"]);
 const obj = (v: unknown): v is Record<string, unknown> =>
   Boolean(v) && typeof v === "object" && !Array.isArray(v);
 
