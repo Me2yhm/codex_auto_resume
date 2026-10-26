@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { classifyRecoveryHistory, replayText, recoveryDiagnostic, MAX_INPUT_BYTES,
-  hasUnambiguousInputProgress } = require('../dist/inputRecovery');
+  hasUnambiguousInputProgress, questionSignals } = require('../dist/inputRecovery');
 const { readRecoveryHistory } = require('../dist/recoveryHistory');
 const NOW = 1_900_000_000_000;
 const input = (text = 'Original input\nCTP requires separate authorization.') => ({ type: 'text', text, text_elements: [] });
@@ -489,4 +489,83 @@ test('answered question may cross compaction but still needs a real post-answer 
   noAck.items.splice(4, 1, { type: 'contextCompaction', id: 'only-context' });
   noAck.items.splice(5, 1); // Remove the command that followed the original acknowledgement.
   assert.equal(classify(history(noAck)).action, 'needs_review');
+});
+
+
+test('question with explicit resolved metadata does not block actually executed work', () => {
+  const turn = failed('finished-question', [
+    user('msg', 'Complete read-only checks with the attached plan.'),
+    { type: 'agentMessage', id: 'q', text: 'The document asks about G4.',
+      status: 'completed', questions: [{ id: 'Q4', resolved: true }] },
+    { type: 'commandExecution', id: 'work', status: 'completed' },
+    { type: 'webSearch', id: 'search', status: 'completed' },
+  ]);
+  assert.equal(hasUnambiguousInputProgress(turn), true);
+  const plan = classify(history(turn));
+  assert.equal(plan.action, 'continue');
+  assert.equal(plan.reason, 'recorded_execution_after_input');
+  assert.deepEqual(plan.evidence[0].questionSignals.map(signal => ({
+    itemIndex: signal.itemIndex, explicitlyResolved: signal.explicitlyResolved,
+    explicitlyPending: signal.explicitlyPending, unknown: signal.unknown,
+  })), [{ itemIndex: 1, explicitlyResolved: 1, explicitlyPending: 0, unknown: 0 }]);
+});
+
+test('completed agent message with question is NOT proof the question was answered', () => {
+  const turn = failed('question-uncertain', [
+    user('one'),
+    { type: 'agentMessage', status: 'completed',
+      questions: [{ id: 'Q4', title: 'SENSITIVE_QUESTION_PROMPT' }] },
+    { type: 'commandExecution', id: 'later-work', status: 'completed' },
+    { type: 'webSearch', id: 'search', status: 'completed' },
+  ]);
+  const plan = classify(history(turn));
+  assert.equal(plan.action, 'needs_review');
+  assert.equal(plan.reason, 'unanswered_question_or_approval');
+  assert.equal(hasUnambiguousInputProgress(turn), false);
+  const signals = plan.evidence[0].questionSignals;
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].questionCount, 1);
+  assert.equal(signals[0].unknown, 1);
+  assert.ok(signals[0].laterProgressItems >= 2);
+  assert.equal(JSON.stringify(recoveryDiagnostic(plan)).includes('SENSITIVE_QUESTION_PROMPT'), false);
+});
+
+test('resolved question never overrides an actually pending independent tool permission', () => {
+  const turn = failed('question-with-permission', [
+    user(), { type: 'agentMessage', id: 'past', text: 'Past question',
+      questions: [{ id: 'past', answered: true }] },
+    { type: 'commandExecution', id: 'work', status: 'completed' },
+    { type: 'dynamicToolCall', tool: 'request_permissions',
+      status: 'inProgress', id: 'still-waiting' },
+  ]);
+  const plan = classify(history(turn));
+  assert.equal(plan.reason, 'unanswered_question_or_approval');
+  assert.equal(plan.action, 'needs_review');
+  assert.ok(plan.evidence[0].questionSignals.some(x => x.pendingTool));
+});
+
+test('unresolved question metadata remains blocked even if later tools and file changes ran', () => {
+  const t = failed('work-question-work', [
+    user(), { type: 'commandExecution', id: 'pre', status: 'completed' },
+    { type: 'agentMessage', id: 'q', questions: [{ id: 'pending', answered: false }] },
+    { type: 'fileChange', id: 'post', status: 'completed' },
+  ]);
+  assert.equal(classify(history(t)).reason, 'unanswered_question_or_approval');
+  assert.equal(hasUnambiguousInputProgress(t), false);
+});
+
+test('questionSignals redacts all question text, choices and arbitrary item statuses', () => {
+  const items = [{ type: 'agentMessage', status: 'SENSITIVE_STATUS',
+    questions: [{ title: 'SECRET_TITLE', answer: 'SECRET_ANSWER',
+      choices: ['SECRET_CHOICE'], status: 'unexpected' }] }];
+  const signals = questionSignals(items);
+  assert.equal(signals.length, 1);
+  assert.deepEqual({
+    status: signals[0].itemStatus,
+    questionCount: signals[0].questionCount,
+    unknown: signals[0].unknown,
+  }, { status: 'other', questionCount: 1, unknown: 1 });
+  for (const secret of ['SECRET_TITLE', 'SECRET_ANSWER', 'SECRET_CHOICE', 'SENSITIVE_STATUS']) {
+    assert.equal(JSON.stringify(signals).includes(secret), false);
+  }
 });
