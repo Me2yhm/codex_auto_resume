@@ -569,3 +569,15 @@ test('questionSignals redacts all question text, choices and arbitrary item stat
     assert.equal(JSON.stringify(signals).includes(secret), false);
   }
 });
+
+test('conflicting explicit question resolution metadata remains blocked', () => {
+  const turn = failed('contradictory-question', [
+    user(), { type: 'agentMessage', id: 'q', text: 'Question',
+      questions: [{ id: 'Q', answered: false, status: 'resolved' }] },
+    { type: 'commandExecution', id: 'later', status: 'completed' },
+  ]);
+  const plan = classify(history(turn));
+  assert.equal(plan.action, 'needs_review');
+  assert.equal(plan.reason, 'unanswered_question_or_approval');
+  assert.equal(plan.evidence[0].questionSignals[0].unknown, 1);
+});
