@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { classifyRecoveryHistory, replayText, recoveryDiagnostic, MAX_INPUT_BYTES,
-  hasUnambiguousInputProgress, questionSignals } = require('../dist/inputRecovery');
+  hasUnambiguousInputProgress, questionSignals,
+  canManuallyConfirmQuestionContinuation } = require('../dist/inputRecovery');
 const { readRecoveryHistory } = require('../dist/recoveryHistory');
 const NOW = 1_900_000_000_000;
 const input = (text = 'Original input\nCTP requires separate authorization.') => ({ type: 'text', text, text_elements: [] });
@@ -580,4 +581,63 @@ test('conflicting explicit question resolution metadata remains blocked', () => 
   assert.equal(plan.action, 'needs_review');
   assert.equal(plan.reason, 'unanswered_question_or_approval');
   assert.equal(plan.evidence[0].questionSignals[0].unknown, 1);
+});
+
+
+test('ambiguous historical question allows only explicit human Continue, never automatic dispatch', () => {
+  const source = failed('worked-and-blocked', [
+    user('initial', 'Run the supplied plan'),
+    { type: 'commandExecution', id: 'work', status: 'completed' },
+    { type: 'agentMessage', id: 'historic-q', status: 'completed',
+      questions: [{ id: 'Q1', text: 'SENSITIVE_QUESTION' }] },
+    { type: 'webSearch', id: 'post-question', status: 'completed' },
+  ]);
+  const h = history(source);
+  assert.equal(canManuallyConfirmQuestionContinuation(source), true);
+  const blocked = classify(h);
+  assert.equal(blocked.action, 'needs_review');
+  assert.equal(blocked.reason, 'unanswered_question_or_approval');
+  const approved = { ...blocked, action: 'continue',
+    reason: 'user_confirmed_ambiguous_question_continue',
+    approval: { action: 'continue', fingerprint: blocked.fingerprint } };
+  const after = classify(h, { previous: approved, nowMs: NOW + 25_000 });
+  assert.equal(after.action, 'continue');
+  assert.equal(after.candidate, 'continue');
+  assert.equal(after.reason, 'user_confirmed_ambiguous_question_continue');
+  assert.equal(replayText(after), 'Run the supplied plan');
+});
+
+test('manual Continue must be invalidated by changed or newly pending question evidence', () => {
+  const source = failed('q', [user('task'),
+    { type: 'agentMessage', questions: [{ id: 'Q4' }] },
+    { type: 'commandExecution', id: 'tool', status: 'completed' }]);
+  const initial = classify(history(source));
+  const approved = { ...initial, action: 'continue',
+    approval: { action: 'continue', fingerprint: initial.fingerprint } };
+  assert.equal(classify(history(source), { previous: approved }).action, 'continue');
+
+  source.items.push({ type: 'dynamicToolCall',
+    tool: 'request_permissions', id: 'new-approval', status: 'inProgress' });
+  const after = classify(history(source), { previous: approved });
+  assert.equal(after.action, 'needs_review');
+  assert.equal(canManuallyConfirmQuestionContinuation(source), false);
+  assert.equal(after.reason, 'unanswered_question_or_approval');
+});
+
+test('manual question fallback rejects an explicit pending question, unknown activity or extra user steer', () => {
+  const base = [user('task'),
+    { type: 'agentMessage', id: 'q', questions: [{ id: 'Q' }] },
+    { type: 'commandExecution', id: 'command', status: 'completed' }];
+  const variants = [
+    base.map(x => x.type === 'agentMessage'
+      ? { ...x, questions: [{ id: 'Q', answered: false }] } : x),
+    [...base, { type: 'dynamicToolCall', tool: 'request_user_input_async', status: 'inProgress' }],
+    [...base, { type: 'unknownActivity', id: 'future' }],
+    [...base, user('new-steer', 'Do something else')],
+    [user('not-started'), { type: 'agentMessage', questions: [{ id: 'Q' }] }],
+  ];
+  for (const items of variants) {
+    const turn = failed('blocked', items);
+    assert.equal(canManuallyConfirmQuestionContinuation(turn), false);
+  }
 });
