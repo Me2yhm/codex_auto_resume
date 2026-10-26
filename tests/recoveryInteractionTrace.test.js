@@ -74,7 +74,7 @@ test("structured question ID can correlate with later reply and tool, without ex
   const report = buildInteractionTrace(t);
   const question = report.questions[0];
   assert.ok(question.questionDetails[0].ids.some(id =>
-    id.field === "questionItemId.call" && id.digest.startsWith("sha256:")));
+    id.field === "questionItemId.call" && id.digest.startsWith("hmac-sha256:")));
   assert.ok(question.matchingRecords.some(record => record.itemIndex === 1));
   assert.ok(question.matchingRecords.some(record => record.itemIndex === 3));
   assert.ok(question.matchingRecords.every(record =>
@@ -96,6 +96,23 @@ test("explicit state booleans are visible, conflicting or arbitrary statuses are
     { field: "status", value: "other" },
   ]);
   assert.equal(report.questions[0].itemStatus, "completed");
+  checkNoSecrets(report);
+});
+
+test("unknown item types and sensitive-looking field names are not exposed", () => {
+  const report = buildInteractionTrace(turn([
+    user(SECRET.prompt),
+    { type: "SECRET_UNKNOWN_DYNAMIC_ITEM_TYPE", questions: [
+      { id: "SECRET_LOW_ENTROPY_ID", password_SECRET_KEY: "SECRET_VAL",
+        questionState: "SECRET_BLOB", answer: SECRET.answer },
+    ] },
+  ]));
+  const details = report.questions[0];
+  assert.equal(details.itemType, "unrecognized_item");
+  assert.ok(details.questionDetails[0].fields.some(f => f.field.startsWith("field_hmac-sha256:")));
+  assert.equal(JSON.stringify(report).includes("SECRET_UNKNOWN_DYNAMIC_ITEM_TYPE"), false);
+  assert.equal(JSON.stringify(report).includes("password_SECRET_KEY"), false);
+  assert.equal(JSON.stringify(report).includes("SECRET_LOW_ENTROPY_ID"), false);
   checkNoSecrets(report);
 });
 
