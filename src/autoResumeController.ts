@@ -460,11 +460,20 @@ export class AutoResumeController implements vscode.Disposable {
    */
   async inspectRecoveryInteractions(): Promise<void> {
     const armed = this.armed();
-    const threadId = armed?.threadId;
-    const turnId = armed?.recoveryPlan?.sourceTurnId || armed?.interruptedTurnId;
+    // After a user manually continues, the Armed record may be gone. A prior
+    // workspace-scoped, metadata-only decision still pins the exact thread
+    // and turn, so diagnosis remains possible without another quota outage.
+    const lastAmbiguousDecision = this.recoveryDecisionHistory().filter(entry =>
+      entry.reason === "unanswered_question_or_approval" &&
+      Boolean(entry.threadId) && Boolean(entry.sourceTurnId)).at(-1);
+    const threadId = armed?.threadId || lastAmbiguousDecision?.threadId;
+    const turnId = armed
+      ? (armed.recoveryPlan?.sourceTurnId || armed.interruptedTurnId)
+      : lastAmbiguousDecision?.sourceTurnId;
+    const targetOrigin = armed ? "current_armed_source" : "historical_saved_ambiguous_decision";
     if (!threadId || !turnId) {
       void vscode.window.showWarningMessage(
-        "No saved recovery source turn is available in this extension host. This diagnostic never guesses the latest turn.",
+        "No saved recovery source turn or prior ambiguous-question decision is available in this extension host. This diagnostic never guesses the latest turn.",
       );
       return;
     }
@@ -486,6 +495,7 @@ export class AutoResumeController implements vscode.Disposable {
       note: "LOCAL READ-ONLY INTERACTION TRACE. Review locally before sharing. No messages were sent, no approvals were granted and no recovery state was changed.",
       threadId,
       requestedTurnId: turnId,
+      targetOrigin,
       extensionHostPlatform: process.platform,
       remoteName: vscode.env?.remoteName ?? null,
       autoResumeExtensionVersion: this.context.extension?.packageJSON?.version ?? "unknown",
