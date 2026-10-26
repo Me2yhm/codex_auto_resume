@@ -885,3 +885,72 @@ test('manual question Continue is denied when a new pending permission appears d
   assert.equal(h.state().recoveryPlan.action, 'needs_review');
   assert.equal(h.sent.length, 0);
 });
+
+
+test('Inspect Recovery Interactions only reads the pinned source turn and never mutates Armed state', async t => {
+  const failedTurn = turn('saved-target-with-unknown-questions', true);
+  failedTurn.items.push({ type: 'agentMessage', id: 'question-record', status: null,
+    questions: [{ id: 'SECRET_Q_ID', title: 'SECRET_QUESTION_BODY',
+      otherFields: { path: 'SECRET_PRIVATE_PATH' } }] });
+  const newer = turn('manual-newer');
+  newer.status = 'completed';
+  const h = setup(t, { turns: [newer, failedTurn], available: false,
+    armed: { interruptedTurnId: failedTurn.id, recoveryPlan: {
+      version: 1, action: 'needs_review', reason: 'unanswered_question_or_approval',
+      sourceTurnId: failedTurn.id, candidate: undefined, inputs: [],
+      fingerprint: 'old-fingerprint', evidence: [],
+      stableSinceMs: NOW, observedAtMs: NOW, stale: false,
+    } } });
+  const original = JSON.stringify(h.state());
+  const updates = h.context.workspaceState.updates.length;
+  await h.controller.inspectRecoveryInteractions();
+  assert.equal(h.previews.length, 1);
+  const report = JSON.parse(h.previews[0].content);
+  assert.equal(report.requestedTurnId, failedTurn.id);
+  assert.equal(report.source.status, 'found');
+  assert.equal(report.trace.questions.length, 1);
+  assert.equal(report.trace.questions[0].itemIndex, 2);
+  assert.equal(report.trace.questions[0].unknown, 1);
+  assert.equal(report.trace.conclusion, 'question_metadata_only_cannot_prove_interaction_resolved');
+  assert.equal(report.note.includes('READ-ONLY'), true);
+  for (const secret of ['SECRET_Q_ID', 'SECRET_QUESTION_BODY', 'SECRET_PRIVATE_PATH']) {
+    assert.equal(h.previews[0].content.includes(secret), false);
+  }
+  assert.deepEqual(h.requests.map(x => x.method), ['thread/turns/list']);
+  assert.deepEqual(h.requests[0].params,
+    { threadId: THREAD, limit: 10, sortDirection: 'desc', itemsView: 'full' });
+  assert.equal(JSON.stringify(h.state()), original);
+  assert.equal(h.context.workspaceState.updates.length, updates);
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.clients.length, 1);
+  assert.equal(h.clients[0].isRunning, false);
+});
+
+test('Inspect Recovery Interactions fails safely without a saved source turn', async t => {
+  const h = setup(t, { available: false });
+  await h.context.workspaceState.update(KEY, undefined);
+  const updates = h.context.workspaceState.updates.length;
+  await h.controller.inspectRecoveryInteractions();
+  assert.equal(h.previews.length, 0);
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.context.workspaceState.updates.length, updates);
+  assert.ok(h.vscode.messages.some(m =>
+    m.message.includes('No saved recovery source turn')));
+});
+
+test('Inspect Recovery Interactions does not fall back to a different latest turn', async t => {
+  const source = turn('different-latest');
+  const h = setup(t, { turns: [source], armed: {
+    interruptedTurnId: 'specific-older-source',
+    recoveryPlan: { sourceTurnId: 'specific-older-source' },
+  } });
+  const prior = JSON.stringify(h.state());
+  await h.controller.inspectRecoveryInteractions();
+  const report = JSON.parse(h.previews.at(-1).content);
+  assert.equal(report.requestedTurnId, 'specific-older-source');
+  assert.equal(report.source.status, 'not_found');
+  assert.equal(report.trace, undefined);
+  assert.equal(JSON.stringify(h.state()), prior);
+  assert.equal(h.sent.length, 0);
+});
