@@ -120,9 +120,9 @@ test("question diagnostics are bounded to 16 groups and 8 questions each", () =>
     questions: Array.from({ length: 20 }, (_, j) => ({ title: SECRET.title, id: i + "/" + j })),
   });
   const report = buildInteractionTrace(turn(items));
-  assert.equal(report.totalQuestionItems, 16);
+  assert.equal(report.totalQuestionItems, 50);
   assert.equal(report.questions.length, 16);
-  assert.equal(report.truncatedQuestionItems, false); // Existing signal collector caps at 16.
+  assert.equal(report.truncatedQuestionItems, true);
   assert.ok(report.questions.every(q => q.questionDetails.length === 8));
   checkNoSecrets(report);
 });
