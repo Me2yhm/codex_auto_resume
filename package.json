@@ -41,6 +41,7 @@
     "onCommand:codexAutoResume.quotaPrimer.primeNow",
     "onCommand:codexAutoResume.quotaPrimer.resetThread",
     "onCommand:codexAutoResume.inspectRecoveryInput",
+    "onCommand:codexAutoResume.inspectRecoveryInteractions",
     "onCommand:codexAutoResume.reviewRecoveryInput"
   ],
   "main": "./dist/extension.js",
@@ -97,6 +98,10 @@
       {
         "command": "codexAutoResume.inspectRecoveryInput",
         "title": "Codex Auto Resume: Inspect Recovery Input"
+      },
+      {
+        "command": "codexAutoResume.inspectRecoveryInteractions",
+        "title": "Codex Auto Resume: Inspect Recovery Interactions (Read-Only)"
       },
       {
         "command": "codexAutoResume.reviewRecoveryInput",
