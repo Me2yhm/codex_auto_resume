@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { createHmac, randomBytes } from "crypto";
 import type { CodexTurn, ThreadTurnsListResponse } from "./types";
 import { questionSignals } from "./inputRecovery";
 
@@ -25,11 +25,15 @@ const KNOWN_ITEM_TYPES = new Set(["userMessage", "agentMessage", "reasoning", "p
   "collabAgentToolCall", "subAgentActivity", "webSearch", "imageView",
   "imageGeneration", "contextCompaction"]);
 const fieldOK = /^[a-zA-Z_][a-zA-Z0-9_]{0,47}$/;
+// A non-exported, process-local salt prevents offline guesses of short IDs
+// such as Q1. The key is deliberately NOT emitted in the diagnostic report.
+const TRACE_HMAC_KEY = randomBytes(32);
 const obj = (v: unknown): v is RecordValue =>
   v !== null && typeof v === "object" && !Array.isArray(v);
 
 function digest(v: string): string {
-  return "sha256:" + createHash("sha256").update(v).digest("hex").slice(0, 24);
+  return "hmac-sha256:" + createHmac("sha256", TRACE_HMAC_KEY)
+    .update(v).digest("hex").slice(0, 24);
 }
 function redactedField(k: string): string {
   // Arbitrary JSON object keys may contain private data. Common schema keys
@@ -171,6 +175,7 @@ export function buildInteractionTrace(turn: CodexTurn) {
     const neighborhood = neighbors.slice(0, hi - lo).map((_, offset) => itemMeta(items, lo + offset));
     return {
       ...signal,
+      itemType: safeType(signal?.itemType),
       parentFields: shape(item),
       parentStateFields: states(item),
       questionDetails: details,
@@ -190,7 +195,7 @@ export function buildInteractionTrace(turn: CodexTurn) {
     questions: questionDetails,
     conclusion: "question_metadata_only_cannot_prove_interaction_resolved",
     interpretation: "Matching IDs and later commands are observations, not proof that a question or permission request was resolved. An absent match is not proof the request is still pending. No recovery decision is made.",
-    privacy: "Field names/types, allowlisted state/boolean values and truncated SHA-256 identifiers only. No prompt/question/answer/file/tool contents or raw request IDs.",
+    privacy: "Field names/types, allowlisted state/boolean values and keyed HMAC-SHA256 identifier tags only. No prompt/question/answer/file/tool contents, raw request IDs or HMAC key.",
   };
 }
 
