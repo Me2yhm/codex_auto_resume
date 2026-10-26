@@ -145,14 +145,22 @@ export function buildInteractionTrace(turn: CodexTurn) {
     const item = items[index];
     const signal = detected.find(x => x.itemIndex === index);
     const questions = obj(item) && Array.isArray(item.questions) ? item.questions : [];
-    const details = questions.slice(0, 8).map((q, qIndex) => ({
-      questionIndex: qIndex,
-      fields: shape(q),
-      stateFields: states(q),
-      ids: idTokens(q),
-      nestedFields: obj(q) ? ["request", "metadata", "resolution", "response"]
-        .filter(k => obj(q[k])).map(k => ({ field: k, fields: shape(q[k]) })) : [],
-    }));
+    const details = questions.slice(0, 8).map((q, qIndex) => {
+      const nested = obj(q) ? ["request", "metadata", "resolution", "response"]
+        .filter(k => obj(q[k])) : [];
+      return {
+        questionIndex: qIndex,
+        valueType: kind(q),
+        fields: shape(q),
+        stateFields: states(q),
+        ids: [...idTokens(q), ...nested.flatMap(k => idTokens((q as RecordValue)[k], k + "."))]
+          .slice(0, 24),
+        nestedFields: nested.map(k => ({
+          field: k, fields: shape((q as RecordValue)[k]),
+          stateFields: states((q as RecordValue)[k]),
+        })),
+      };
+    });
     const related = new Set<string>();
     for (const q of details) for (const id of q.ids) related.add(id.digest);
     const matchingRecords: Array<{ itemIndex: number; itemType: string;
