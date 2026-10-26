@@ -331,12 +331,16 @@ type QuestionState = "resolved" | "pending" | "unknown";
  * is interrupted, but that notification is not guaranteed in turn history. */
 function questionState(question: unknown): QuestionState {
   if (!record(question)) return "unknown";
-  if (question.answered === true || question.resolved === true ||
-      question.isAnswered === true ||
-      question.status === "answered" || question.status === "resolved") return "resolved";
-  if (question.answered === false || question.resolved === false ||
-      question.isAnswered === false ||
-      ["pending", "inProgress", "unanswered", "waiting"].includes(String(question.status))) return "pending";
+  const positive = question.answered === true || question.resolved === true ||
+    question.isAnswered === true ||
+    question.status === "answered" || question.status === "resolved";
+  const negative = question.answered === false || question.resolved === false ||
+    question.isAnswered === false ||
+    ["pending", "inProgress", "unanswered", "waiting"].includes(String(question.status));
+  // Conflicting metadata is ambiguous, never permission to continue.
+  if (positive && negative) return "unknown";
+  if (negative) return "pending";
+  if (positive) return "resolved";
   return "unknown";
 }
 
