@@ -824,3 +824,64 @@ test('explicitly resolved historical question plus real work can recover without
   assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
   assert.deepEqual(h.sent[0].overrides, {});
 });
+
+
+test('human can approve a Continue-only fallback for a progressed turn with unknown historical question', async t => {
+  const source = turn('question-in-work', true);
+  source.items[0].content[0].text = '# Files pasted by the user:\n\n' +
+    '## "plan": /home/test/.codex/attachments/0a3f824f-592f-4ac1-ba7b-b5d6fd8aadd3/Pasted text.txt\n' +
+    '\n## My request:\nAudit files only.\n';
+  source.items.push({ type: 'agentMessage', id: 'question',
+    status: 'completed', questions: [{ id: 'Q1' }] });
+  source.items.push({ type: 'webSearch', id: 'work-after-question', status: 'completed' });
+  const prior = turn('prior-completed');
+  prior.status = 'completed';
+  const h = setup(t, { turns: [source, prior], available: false });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.reason, 'unanswered_question_or_approval');
+  assert.equal(h.sent.length, 0);
+
+  let sawSafetyWarning = false;
+  h.choose(choices => {
+    assert.equal(choices.length, 1);
+    assert.equal(choices[0], 'Continue existing work after quota recovery');
+    sawSafetyWarning = true;
+    return choices[0];
+  });
+  await h.controller.reviewRecoveryInput();
+  assert.equal(sawSafetyWarning, true);
+  assert.equal(h.state().recoveryPlan.action, 'continue');
+  assert.equal(h.state().recoveryPlan.reason, 'user_confirmed_ambiguous_question_continue');
+  assert.equal(h.state().recoveryPlan.approval.action, 'continue');
+  assert.equal(h.sent.length, 0);
+
+  h.advance(10_000); await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'continue');
+  h.setQuota(quota(true));
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 0);
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].threadId, THREAD);
+  assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
+  assert.deepEqual(h.sent[0].overrides, {}); // No TXT is replayed.
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 1);
+});
+
+test('manual question Continue is denied when a new pending permission appears during Review', async t => {
+  const source = turn('question-gated', true);
+  source.items.push({ type: 'agentMessage', id: 'historical-question',
+    questions: [{ id: 'Q' }] });
+  const h = setup(t, { turns: [source], available: false });
+  await h.tick();
+  h.choose(choices => {
+    source.items.push({ type: 'dynamicToolCall', id: 'new-approval',
+      tool: 'request_permissions', status: 'inProgress' });
+    h.setTurns([source]);
+    return choices[0];
+  });
+  await h.controller.reviewRecoveryInput();
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+  assert.equal(h.sent.length, 0);
+});
