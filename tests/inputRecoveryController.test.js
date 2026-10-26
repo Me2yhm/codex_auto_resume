@@ -775,3 +775,52 @@ test('G4 with compaction but no real executed work remains held rather than repl
   assert.equal(h.state().recoveryPlan.action, 'needs_review');
   assert.equal(h.sent.length, 0);
 });
+
+
+test('Inspect reveals redacted question position and status without leaking question content', async t => {
+  const source = turn('blocked-after-real-work', true);
+  source.items.push({ type: 'agentMessage', id: 'question-in-history',
+    status: 'completed', text: 'SECRET_AGENT_RESPONSE',
+    questions: [{ id: 'Q4', title: 'SECRET_AUTHORIZATION_QUESTION' }] });
+  source.items.push({ type: 'fileChange', id: 'after-question-work',
+    status: 'completed', changes: [{ path: 'SECRET_FILE_PATH' }] });
+  const h = setup(t, { turns: [source], available: false,
+    policy: 'replayStableUserOnly' });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.reason, 'unanswered_question_or_approval');
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+  await h.controller.inspectRecoveryInput();
+  const report = JSON.parse(h.previews.at(-1).content);
+  const signal = report.evidence[0].questionSignals[0];
+  assert.equal(signal.itemType, 'agentMessage');
+  assert.equal(signal.itemIndex, 2);
+  assert.equal(signal.itemStatus, 'completed');
+  assert.equal(signal.questionCount, 1);
+  assert.equal(signal.unknown, 1);
+  assert.equal(signal.pendingTool, false);
+  assert.ok(signal.laterProgressItems > 0);
+  assert.equal(report.persistedRecovery.reason, 'unanswered_question_or_approval');
+  assert.equal(JSON.stringify(report).includes('SECRET_AUTHORIZATION_QUESTION'), false);
+  assert.equal(JSON.stringify(report).includes('SECRET_AGENT_RESPONSE'), false);
+  assert.equal(JSON.stringify(report).includes('SECRET_FILE_PATH'), false);
+  assert.equal(h.sent.length, 0);
+});
+
+test('explicitly resolved historical question plus real work can recover without replay', async t => {
+  const source = turn('resolved-question-and-work', true);
+  source.items.push({ type: 'agentMessage', id: 'resolved',
+    status: 'completed', text: 'Confirmed',
+    questions: [{ id: 'Q4', answered: true }] });
+  source.items.push({ type: 'commandExecution', id: 'after', status: 'completed' });
+  const h = setup(t, { turns: [source], available: false });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'continue');
+  assert.equal(h.state().recoveryPlan.reason, 'recorded_execution_after_input');
+  h.setQuota(quota(true));
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 0);
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
+  assert.deepEqual(h.sent[0].overrides, {});
+});
