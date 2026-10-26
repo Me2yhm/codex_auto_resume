@@ -34,6 +34,7 @@ jobs:
           tests/recoveryAttachments.test.js
           tests/inputRecovery.test.js
           tests/inputRecoveryController.test.js
+          tests/recoveryInteractionTrace.test.js
           tests/autoResumeSafetyReview.test.js
           tests/officialCodexUiRegression.test.js
       - if: runner.os == 'Linux'
