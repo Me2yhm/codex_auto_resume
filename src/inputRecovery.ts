@@ -42,6 +42,19 @@ export interface RecoveryEvidence {
   itemTypes: string[];
   messageIds: string[];
   inputBytes: number;
+  /** Structural only: never serialize question text, options or answers. */
+  questionSignals?: QuestionSignal[];
+}
+export interface QuestionSignal {
+  itemIndex: number;
+  itemType: string;
+  itemStatus: "completed" | "inProgress" | "failed" | "declined" | "interrupted" | "other" | null;
+  questionCount: number;
+  explicitlyResolved: number;
+  explicitlyPending: number;
+  unknown: number;
+  laterProgressItems: number;
+  pendingTool: boolean;
 }
 export interface RecoveryHistory {
   turns: CodexTurn[]; // newest first; ends at a prior execution/non-quota boundary
@@ -307,13 +320,66 @@ function repeatedQuotaInputWithExecution(pending: CodexTurn[]): boolean {
   });
 }
 
+const QUESTION_TOOLS = new Set([
+  "request_user_input", "request_user_input_async", "request_permissions", "request_approval",
+]);
+type QuestionState = "resolved" | "pending" | "unknown";
+
+/** A completed agentMessage does NOT prove its embedded question was answered.
+ * Only explicit per-question resolution metadata can release this guard.
+ * Codex request/resolved events can also clear a pending prompt when a turn
+ * is interrupted, but that notification is not guaranteed in turn history. */
+function questionState(question: unknown): QuestionState {
+  if (!record(question)) return "unknown";
+  if (question.answered === true || question.resolved === true ||
+      question.isAnswered === true ||
+      question.status === "answered" || question.status === "resolved") return "resolved";
+  if (question.answered === false || question.resolved === false ||
+      question.isAnswered === false ||
+      ["pending", "inProgress", "unanswered", "waiting"].includes(String(question.status))) return "pending";
+  return "unknown";
+}
+
+/** Metadata-only question audit for Inspect. No prompt, answer, option,
+ * arbitrary status or tool arguments may leave the local full-history reader. */
+export function questionSignals(items: unknown[]): QuestionSignal[] {
+  const signals: QuestionSignal[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (!record(item)) continue;
+    const questions = Array.isArray(item.questions) ? item.questions : [];
+    const pendingTool = item.type === "dynamicToolCall" &&
+      QUESTION_TOOLS.has(String(item.tool)) && item.status !== "completed";
+    if (!questions.length && !pendingTool) continue;
+    const states = questions.map(questionState);
+    const knownStatuses = ["completed", "inProgress", "failed", "declined", "interrupted"];
+    const status = typeof item.status === "string"
+      ? (knownStatuses.includes(item.status) ? item.status : "other") : null;
+    signals.push({
+      itemIndex: index,
+      itemType: String(item.type),
+      itemStatus: status as QuestionSignal["itemStatus"],
+      questionCount: questions.length,
+      explicitlyResolved: states.filter(state => state === "resolved").length,
+      explicitlyPending: states.filter(state => state === "pending").length,
+      unknown: states.filter(state => state === "unknown").length,
+      laterProgressItems: items.slice(index + 1).filter(itemHasProgress).length,
+      pendingTool,
+    });
+    if (signals.length >= 16) break;
+  }
+  return signals;
+}
+
 function waitingOnQuestion(items: unknown[]): boolean {
+  // Do not treat an explicitly resolved historical question as a current
+  // pending request. Ambiguous metadata and actual pending tools still block.
   return items.some(item => {
     if (!record(item)) return false;
-    if (Array.isArray(item.questions) && item.questions.length > 0) return true;
+    if (Array.isArray(item.questions) &&
+        item.questions.some(question => questionState(question) !== "resolved")) return true;
     return item.type === "dynamicToolCall" &&
-      ["request_user_input", "request_user_input_async", "request_permissions", "request_approval"].includes(String(item.tool)) &&
-      item.status !== "completed";
+      QUESTION_TOOLS.has(String(item.tool)) && item.status !== "completed";
   });
 }
 
@@ -363,6 +429,8 @@ export function classifyRecoveryHistory(
         plan.inputs.push({ turnId: turn.id, messageId: item.id, content: JSON.parse(JSON.stringify(item.content)) });
       }
     }
+    const interactions = questionSignals(turn.items);
+    if (interactions.length) evidence.questionSignals = interactions;
     plan.evidence.push(evidence);
   }
   if (totalBytes > MAX_INPUT_BYTES) return { ...plan, inputs: [], reason: "input_too_large" };
