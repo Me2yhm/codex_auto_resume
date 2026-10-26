@@ -487,7 +487,7 @@ export class AutoResumeController implements vscode.Disposable {
       const historical = plan.reason === "unanswered_question_or_approval"
         ? await readRecoveryHistory(this.client!, armed.threadId) : null;
       const manualQuestionContinue = !plan.stale && plan.reason === "unanswered_question_or_approval" &&
-        historical?.complete === true && historical.turns.length === 1 &&
+        historical?.complete === true && plan.inputs.length === 1 && historical.turns.length >= 1 &&
         historical.turns[0].id === plan.sourceTurnId &&
         canManuallyConfirmQuestionContinuation(historical.turns[0]);
       if (!manualQuestionContinue &&
@@ -515,7 +515,7 @@ export class AutoResumeController implements vscode.Disposable {
       }), plan);
       const current = this.armed();
       const revalidatedManualQuestion = manualQuestionContinue && choice === proceed &&
-        fresh.complete && fresh.turns.length === 1 &&
+        fresh.complete && fresh.turns.length >= 1 &&
         fresh.turns[0].id === plan.sourceTurnId &&
         canManuallyConfirmQuestionContinuation(fresh.turns[0]) &&
         check.reason === "unanswered_question_or_approval";
