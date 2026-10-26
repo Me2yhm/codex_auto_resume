@@ -954,3 +954,32 @@ test('Inspect Recovery Interactions does not fall back to a different latest tur
   assert.equal(JSON.stringify(h.state()), prior);
   assert.equal(h.sent.length, 0);
 });
+
+
+test('read-only interaction diagnosis can inspect a saved ambiguous historical source after Armed clears', async t => {
+  const source = turn('past-ambiguous-turn', true);
+  source.items.push({ type: 'agentMessage', questions: [{ requestId: 'SECRET_REQUEST_ID' }] });
+  const h = setup(t, { turns: [source] });
+  await h.context.workspaceState.update(KEY, undefined);
+  await h.context.workspaceState.update('codexAutoResume.recoveryDecisionHistory', [{
+    observedAtMs: NOW - 60000, threadId: THREAD, sourceTurnId: source.id,
+    action: 'needs_review', reason: 'unanswered_question_or_approval',
+    preservedInputs: 1, fingerprint: 'historical-fingerprint',
+  }]);
+  const before = h.context.workspaceState.updates.length;
+  const previous = JSON.stringify(h.context.workspaceState.get(
+    'codexAutoResume.recoveryDecisionHistory'));
+  await h.controller.inspectRecoveryInteractions();
+  const report = JSON.parse(h.previews.at(-1).content);
+  assert.equal(report.targetOrigin, 'historical_saved_ambiguous_decision');
+  assert.equal(report.requestedTurnId, source.id);
+  assert.equal(report.source.status, 'found');
+  assert.equal(report.trace.questions.length, 1);
+  assert.equal(h.previews.at(-1).content.includes('SECRET_REQUEST_ID'), false);
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].method, 'thread/turns/list');
+  assert.equal(h.context.workspaceState.updates.length, before);
+  assert.equal(JSON.stringify(h.context.workspaceState.get(
+    'codexAutoResume.recoveryDecisionHistory')), previous);
+  assert.equal(h.sent.length, 0);
+});
