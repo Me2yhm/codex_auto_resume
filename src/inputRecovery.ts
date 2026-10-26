@@ -375,6 +375,23 @@ export function questionSignals(items: unknown[]): QuestionSignal[] {
   return signals;
 }
 
+/** Explicit user confirmation may release an AMBIGUOUS historical question
+ * after verified work; it may NOT override a known pending question/permission,
+ * unknown activity, second user input or unstarted task. This never grants
+ * execution permissions and never chooses to replay attachments. */
+export function canManuallyConfirmQuestionContinuation(turn: CodexTurn): boolean {
+  if (!isQuotaFailure(turn) || turn.itemsView !== "full" ||
+      !Array.isArray(turn.items) || !hasRecordedProgress(turn)) return false;
+  const items = turn.items;
+  const users = items.filter(item => record(item) && item.type === "userMessage");
+  if (users.length !== 1 || items[0] !== users[0] ||
+      !items.every(knownHistoryItem)) return false;
+  const signals = questionSignals(items);
+  if (!signals.some(signal => signal.unknown > 0) ||
+      signals.some(signal => signal.pendingTool || signal.explicitlyPending > 0)) return false;
+  return true;
+}
+
 function waitingOnQuestion(items: unknown[]): boolean {
   // Do not treat an explicitly resolved historical question as a current
   // pending request. Ambiguous metadata and actual pending tools still block.
@@ -459,7 +476,16 @@ export function classifyRecoveryHistory(
       reason: "answered_question_followed_by_execution" };
   }
   if (plan.inputs.length !== 1) return { ...plan, reason: "multiple_unresolved_inputs" };
-  if (waitingOnQuestion(items)) return { ...plan, reason: "unanswered_question_or_approval" };
+  if (waitingOnQuestion(items)) {
+    if (unchanged && previous?.approval?.action === "continue" &&
+        previous.approval.fingerprint === fingerprint &&
+        canManuallyConfirmQuestionContinuation(latest)) {
+      return { ...plan, action: "continue", candidate: "continue",
+        reason: "user_confirmed_ambiguous_question_continue",
+        approval: previous.approval };
+    }
+    return { ...plan, reason: "unanswered_question_or_approval" };
+  }
   if (items.some(item => !knownHistoryItem(item))) {
     return { ...plan, reason: "unknown_item_or_context_activity" };
   }
