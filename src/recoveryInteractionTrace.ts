@@ -130,6 +130,12 @@ function itemMeta(items: unknown[], i: number) {
 export function buildInteractionTrace(turn: CodexTurn) {
   const items = turn.itemsView === "full" && Array.isArray(turn.items) ? turn.items : [];
   const detected = questionSignals(items);
+  const totalQuestionItems = items.filter(item => obj(item) &&
+    ((Array.isArray(item.questions) && item.questions.length > 0) ||
+      (item.type === "dynamicToolCall" &&
+        ["request_user_input", "request_user_input_async", "request_permissions",
+          "request_approval"].includes(String(item.tool)) &&
+        item.status !== "completed"))).length;
   const questionIndexes = detected.slice(0, MAX_QUESTION_ITEMS).map(s => s.itemIndex);
   const questionDetails = questionIndexes.map(index => {
     const item = items[index];
@@ -179,8 +185,8 @@ export function buildInteractionTrace(turn: CodexTurn) {
     turnStatus: safeState(turn.status),
     itemsView: turn.itemsView ?? null,
     totalItems: items.length,
-    totalQuestionItems: detected.length,
-    truncatedQuestionItems: detected.length > MAX_QUESTION_ITEMS,
+    totalQuestionItems,
+    truncatedQuestionItems: totalQuestionItems > MAX_QUESTION_ITEMS,
     questions: questionDetails,
     conclusion: "question_metadata_only_cannot_prove_interaction_resolved",
     interpretation: "Matching IDs and later commands are observations, not proof that a question or permission request was resolved. An absent match is not proof the request is still pending. No recovery decision is made.",
