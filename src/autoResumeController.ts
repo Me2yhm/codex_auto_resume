@@ -2,6 +2,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import {
   classifyRecoveryHistory, hasUnambiguousInputProgress, isQuotaFailure, recoveryDiagnostic,
+  canManuallyConfirmQuestionContinuation,
   RecoveryPlan, replayText, replayAttachments, UserOnlyPolicy, matchesReplayedInput,
 } from "./inputRecovery";
 import { readRecoveryHistory } from "./recoveryHistory";
@@ -483,36 +484,59 @@ export class AutoResumeController implements vscode.Disposable {
         noteOnTxt: "Verified TXT content is retained and sent as a separate native UI attachment; the original prompt remains unchanged.",
       }, null, 2) });
       await vscode.window.showTextDocument(document, { preview: true });
-      if (plan.stale || plan.candidate !== "replay_input" || replayText(plan) === undefined) {
+      const historical = plan.reason === "unanswered_question_or_approval"
+        ? await readRecoveryHistory(this.client!, armed.threadId) : null;
+      const manualQuestionContinue = !plan.stale && plan.reason === "unanswered_question_or_approval" &&
+        historical?.complete === true && historical.turns.length === 1 &&
+        historical.turns[0].id === plan.sourceTurnId &&
+        canManuallyConfirmQuestionContinuation(historical.turns[0]);
+      if (!manualQuestionContinue &&
+          (plan.stale || plan.candidate !== "replay_input" || replayText(plan) === undefined)) {
         const detail = plan.reason.startsWith("attachment_")
           ? `TXT attachment is blocked by ${plan.reason}; fix or restore the original file in the same host. Review cannot waive attachment integrity checks.`
-          : "The input is incomplete, unsupported, multiple, oversized, or already executing; review cannot safely replay it.";
+          : "The input is incomplete, unsupported, multiple, oversized, or has an unresolved interaction that cannot safely be replayed.";
         void vscode.window.showWarningMessage(`${detail} Nothing was sent.`);
         return;
       }
       const replay = "Replay saved input after quota recovery";
       const proceed = "Continue existing work after quota recovery";
-      const choice = await vscode.window.showWarningMessage(
-        "Full history contains one user input but cannot prove whether it started. Choose only after checking the original conversation. This queues one exact action, not additional execution permissions.",
-        { modal: true }, replay, proceed,
-      );
+      const choice = manualQuestionContinue
+        ? await vscode.window.showWarningMessage(
+          "History contains an ambiguous question, but this turn has executed work. Only if you personally verified that no answer or approval is still pending, choose Continue. This sends the configured continuation prompt once after quota recovery and grants NO new permissions; the original prompt and its attachments will NOT be resent.",
+          { modal: true }, proceed)
+        : await vscode.window.showWarningMessage(
+          "Full history contains one user input but cannot prove whether it started. Choose only after checking the original conversation. This queues one exact action, not additional execution permissions.",
+          { modal: true }, replay, proceed,
+        );
       if (choice !== replay && choice !== proceed) return;
       const fresh = await readRecoveryHistory(this.client!, armed.threadId);
       const check = await materializePastedTxt(classifyRecoveryHistory(fresh, { nowMs: Date.now(), previous: plan,
         replaySourceTurnId: fresh.turns[0]?.id === prepared?.replayTurnId ? prepared?.replaySourceTurnId : undefined,
       }), plan);
       const current = this.armed();
+      const revalidatedManualQuestion = manualQuestionContinue && choice === proceed &&
+        fresh.complete && fresh.turns.length === 1 &&
+        fresh.turns[0].id === plan.sourceTurnId &&
+        canManuallyConfirmQuestionContinuation(fresh.turns[0]) &&
+        check.reason === "unanswered_question_or_approval";
+      const revalidatedReplay = !manualQuestionContinue &&
+        check.candidate === "replay_input" && !check.stale && replayText(check) !== undefined;
       if (!this.canMonitor() || !current || current.armedAtMs !== armed.armedAtMs ||
           current.threadId !== armed.threadId || current.dispatchPending || current.resumeTurnId ||
-          !fresh.complete || check.fingerprint !== plan.fingerprint || check.candidate !== "replay_input" ||
-          check.stale || replayText(check) === undefined ||
+          !fresh.complete || check.fingerprint !== plan.fingerprint ||
+          !(revalidatedManualQuestion || revalidatedReplay) ||
           current.recoveryPlan?.fingerprint !== plan.fingerprint) {
         void vscode.window.showWarningMessage("Recovery changed while the dialog was open. The stale choice was not applied; review the latest input.");
         return;
       }
       const action = choice === replay ? "replay_input" as const : "continue" as const;
-      const approved: RecoveryPlan = { ...check, action, reason: "user_confirmed_action",
-        approval: { action, fingerprint: check.fingerprint } };
+      const approved: RecoveryPlan = {
+        ...check, action,
+        ...(manualQuestionContinue ? { candidate: "continue" as const } : {}),
+        reason: manualQuestionContinue
+          ? "user_confirmed_ambiguous_question_continue" : "user_confirmed_action",
+        approval: { action, fingerprint: check.fingerprint },
+      };
       await this.saveArmed({ ...current, recoveryPlan: approved, replayAttempts: 0 });
       await this.saveRecoveryDecision(current.threadId, approved);
       this.availabilityCandidate = undefined;
