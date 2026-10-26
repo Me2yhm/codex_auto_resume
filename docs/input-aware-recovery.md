@@ -39,6 +39,20 @@ Read-only. It reads the Armed work thread, or the selected recent workspace work
 
 Useful sample classes are (1) a work turn that executed and then exhausted quota, (2) a new task submitted after quota was already exhausted, and (3) a selection-generated question-plus-answer submitted after exhaustion. No artificial quota depletion is needed.
 
+### `Codex Auto Resume: Inspect Recovery Interactions (Read-Only)`
+
+New **diagnosis-only** command for the user-observed `questionSignals` at indices such as 12 and 86. It reads the exact saved recovery source turn by `thread/turns/list` with full items; up to five pages, ten turns per page and 4 MiB total. Unlike the ordinary recovery-history reader, this target-specific lookup does not silently stop on a newer completed turn or substitute a different latest turn. It uses an **independent temporary Codex app-server reader**, invokes no quota reads, `tick()`, UI IPC, permissions, state updates, or recovery classification, and closes the reader after inspection. Without an Armed source turn, the command stops with a warning.
+
+The untitled JSON contains:
+- exact turn ID and read status (`found`, `not_found`, `malformed`, `too_large`, `unavailable`, `page_limit`), host and official extension version;
+- bounded `questions` entries with item index, type, sanitized parent status and typed field-key shapes for each question and select nested metadata, plus known answered/pending boolean and allowlisted state fields;
+- SHA-256 **digests** of candidate request/call identifiers rather than raw identifier values, including a safe structural parse of serialized `questionItemId`;
+- nearby item types/statuses and cross-item identifier matches, marked **identifier match only, not resolution proof**. A user reply envelope may be examined locally for IDs; the answer and original text are never emitted.
+
+No prompt, question title, choice, answer, attached TXT, user/path information, tool command/output or arbitrary string value is included. Arbitrary/sensitive field keys are hashed. This is an ephemeral local preview, not a file committed to this repository or a log of the full history. **Review the JSON locally before sharing it.** An absent cross-item match cannot prove a question remains pending; a match or later execution cannot prove that it was answered or permission granted.
+
+The command does **not** change `waitingOnQuestion()`, `needs_review`, user-confirmed `continue`, the two-availability-read gate or the once-only dispatch journal. If the official history lacks a reliable resolution event, the next development decision will be whether to capture narrowly scoped interaction lifecycle events on future turns; do not invent resolution semantics or unblock prior work from this trace alone.
+
 ### `Codex Auto Resume: Review Recovery Input`
 
 Opens a **local untitled preview containing the original input**. This preview may contain private text; it is not an automatically redacted report and must not be uploaded blindly. Editing the preview does not modify the stored payload.
