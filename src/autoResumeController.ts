@@ -6,6 +6,7 @@ import {
   RecoveryPlan, replayText, replayAttachments, UserOnlyPolicy, matchesReplayedInput,
 } from "./inputRecovery";
 import { readRecoveryHistory } from "./recoveryHistory";
+import { buildInteractionTrace, readInteractionTurn } from "./recoveryInteractionTrace";
 import { materializePastedTxt, verifyPastedTxtBeforeSend } from "./recoveryAttachments";
 import { classifyQuotaAvailability } from "./quotaAvailability";
 import { RecoveryCoordinator } from "./recoveryCoordination";
@@ -449,6 +450,53 @@ export class AutoResumeController implements vscode.Disposable {
     };
     const document = await vscode.workspace.openTextDocument({ language: "json", content: JSON.stringify(report, null, 2) });
     await vscode.window.showTextDocument(document, { preview: true });
+  }
+
+  /**
+   * On-demand diagnostic for an exact saved interrupted turn. This method
+   * deliberately uses an independent app-server reader: no tick(), quota
+   * queries, workspace-state updates, UI writer or recovery classification.
+   * It only opens an untitled local report after sanitizing all history data.
+   */
+  async inspectRecoveryInteractions(): Promise<void> {
+    const armed = this.armed();
+    const threadId = armed?.threadId;
+    const turnId = armed?.recoveryPlan?.sourceTurnId || armed?.interruptedTurnId;
+    if (!threadId || !turnId) {
+      void vscode.window.showWarningMessage(
+        "No saved recovery source turn is available in this extension host. This diagnostic never guesses the latest turn.",
+      );
+      return;
+    }
+    const reader = new CodexRpcClient(resolveCodexExecutable(this.output), this.output);
+    let lookup: Awaited<ReturnType<typeof readInteractionTurn>>;
+    try {
+      await reader.start();
+      lookup = await readInteractionTurn(reader, threadId, turnId);
+    } catch {
+      lookup = { status: "unavailable", pagesRead: 0, turnsScanned: 0 };
+    } finally {
+      reader.dispose();
+    }
+    const report = {
+      note: "LOCAL READ-ONLY INTERACTION TRACE. Review locally before sharing. No messages were sent, no approvals were granted and no recovery state was changed.",
+      threadId,
+      requestedTurnId: turnId,
+      extensionHostPlatform: process.platform,
+      remoteName: vscode.env?.remoteName ?? null,
+      autoResumeExtensionVersion: this.context.extension?.packageJSON?.version ?? "unknown",
+      officialExtensionVersion: vscode.extensions?.getExtension("openai.chatgpt")?.packageJSON?.version ?? "unknown",
+      source: {
+        status: lookup.status, pagesRead: lookup.pagesRead,
+        turnsScanned: lookup.turnsScanned,
+      },
+      ...(lookup.turn ? { trace: buildInteractionTrace(lookup.turn) } : {}),
+      recoveryStateNote: "No recovery action, quota availability, attachment hash or persisted Armed state was inspected or modified.",
+    };
+    const doc = await vscode.workspace.openTextDocument({
+      language: "json", content: JSON.stringify(report, null, 2),
+    });
+    await vscode.window.showTextDocument(doc, { preview: true });
   }
 
   /** An explicit per-input choice queues an action; it never bypasses quota guards. */
