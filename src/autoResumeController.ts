@@ -468,15 +468,19 @@ export class AutoResumeController implements vscode.Disposable {
       );
       return;
     }
-    const reader = new CodexRpcClient(resolveCodexExecutable(this.output), this.output);
+    let reader: CodexRpcClient | undefined;
     let lookup: Awaited<ReturnType<typeof readInteractionTurn>>;
+    // The short-lived reader must never write raw app-server stderr or parse
+    // errors into the regular Output channel. Errors become generic status.
+    const quietOutput = { appendLine(_line: string) {} } as vscode.OutputChannel;
     try {
+      reader = new CodexRpcClient(resolveCodexExecutable(quietOutput), quietOutput);
       await reader.start();
       lookup = await readInteractionTurn(reader, threadId, turnId);
     } catch {
       lookup = { status: "unavailable", pagesRead: 0, turnsScanned: 0 };
     } finally {
-      reader.dispose();
+      reader?.dispose();
     }
     const report = {
       note: "LOCAL READ-ONLY INTERACTION TRACE. Review locally before sharing. No messages were sent, no approvals were granted and no recovery state was changed.",
