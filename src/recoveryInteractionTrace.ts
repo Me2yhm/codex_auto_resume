@@ -163,14 +163,25 @@ export function buildInteractionTrace(turn: CodexTurn) {
     });
     const related = new Set<string>();
     for (const q of details) for (const id of q.ids) related.add(id.digest);
-    const matchingRecords: Array<{ itemIndex: number; itemType: string;
-      matchingDigests: string[]; evidenceType: string }> = [];
+    const matchingRecords: Array<{
+      itemIndex: number; itemType: string; itemStatus: string | null;
+      relativeOrder: "before_question" | "after_question";
+      structuredReplyMatch: boolean;
+      matchingDigests: string[]; evidenceType: string;
+    }> = [];
     for (let i = 0; i < items.length; i += 1) {
       if (i === index) continue;
-      const matches = [...relatedIds(items[i]), ...replyIds(items[i])]
+      const replyMatches = replyIds(items[i])
         .map(token => token.digest).filter(h => related.has(h));
+      const matches = [...relatedIds(items[i]).map(token => token.digest)
+        .filter(h => related.has(h)), ...replyMatches];
       if (matches.length) matchingRecords.push({
         itemIndex: i, itemType: itemMeta(items, i).itemType,
+        itemStatus: itemMeta(items, i).itemStatus,
+        relativeOrder: i < index ? "before_question" : "after_question",
+        // Only an exact ID match inside Codex's structured reply envelope
+        // merits this label. The presence of later work is NOT resolution proof.
+        structuredReplyMatch: replyMatches.length > 0,
         matchingDigests: [...new Set(matches)].slice(0, 8),
         evidenceType: "identifier_match_only_not_resolution_proof",
       });
