@@ -47,7 +47,7 @@ The untitled JSON contains:
 - exact turn ID and read status (`found`, `not_found`, `malformed`, `too_large`, `unavailable`, `page_limit`), host and official extension version;
 - bounded `questions` entries with item index, type, sanitized parent status and typed field-key shapes for each question and select nested metadata, plus known answered/pending boolean and allowlisted state fields;
 - Keyed HMAC-SHA256 **tags** of candidate request/call identifiers rather than raw identifier values (the secret key remains in the extension process and is not exported), including a safe structural parse of serialized `questionItemId`;
-- nearby item types/statuses and cross-item identifier matches, marked **identifier match only, not resolution proof**. A user reply envelope may be examined locally for IDs; the answer and original text are never emitted.
+- nearby item types/statuses and cross-item identifier matches, marked **identifier match only, not resolution proof**. Each match reports whether it came **before** or **after** the question, whether the matched identifier appeared inside a recognized structured reply envelope, and the matched item's allowlisted status. A user reply envelope may be examined locally for IDs; the answer and original text are never emitted.
 
 No prompt, question title, choice, answer, attached TXT, user/path information, tool command/output or arbitrary string value is included. Arbitrary/sensitive field keys are hashed. This is an ephemeral local preview, not a file committed to this repository or a log of the full history. **Review the JSON locally before sharing it.** An absent cross-item match cannot prove a question remains pending; a match or later execution cannot prove that it was answered or permission granted.
 
