@@ -24,6 +24,8 @@ function createMemoryMemento(initial = {}) {
 function createVscodeMock(options = {}) {
   const configuration = {
     "codexAutoResume.enabled": true,
+    // Legacy regression fixtures do not provide full turn items.
+    "codexAutoResume.inputRecovery.enabled": false,
     ...options.configuration,
   };
   const statusBars = [];

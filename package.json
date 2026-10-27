@@ -2,7 +2,7 @@
   "name": "codex-auto-resume",
   "displayName": "Codex Auto Resume",
   "description": "Automatically resume interrupted OpenAI Codex work and prime rolling quota windows after reset.",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "publisher": "me2yhm",
   "private": true,
   "license": "UNLICENSED",
@@ -39,7 +39,10 @@
     "onCommand:codexAutoResume.quotaPrimer.disable",
     "onCommand:codexAutoResume.quotaPrimer.status",
     "onCommand:codexAutoResume.quotaPrimer.primeNow",
-    "onCommand:codexAutoResume.quotaPrimer.resetThread"
+    "onCommand:codexAutoResume.quotaPrimer.resetThread",
+    "onCommand:codexAutoResume.inspectRecoveryInput",
+    "onCommand:codexAutoResume.inspectRecoveryInteractions",
+    "onCommand:codexAutoResume.reviewRecoveryInput"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -91,6 +94,18 @@
       {
         "command": "codexAutoResume.quotaPrimer.resetThread",
         "title": "Codex Auto Resume: Reset Quota Primer Thread"
+      },
+      {
+        "command": "codexAutoResume.inspectRecoveryInput",
+        "title": "Codex Auto Resume: Inspect Recovery Input"
+      },
+      {
+        "command": "codexAutoResume.inspectRecoveryInteractions",
+        "title": "Codex Auto Resume: Inspect Recovery Interactions (Read-Only)"
+      },
+      {
+        "command": "codexAutoResume.reviewRecoveryInput",
+        "title": "Codex Auto Resume: Review Recovery Input"
       }
     ],
     "configuration": {
@@ -197,6 +212,20 @@
           "default": false,
           "scope": "machine",
           "description": "Allow Quota Primer to use a different model if the preferred low-cost model is unavailable. Disabled by default to avoid unexpectedly expensive primer requests."
+        },
+        "codexAutoResume.inputRecovery.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inspect complete quota-failed turn history and preserve late user input. Unknown/unsupported evidence waits for review instead of silently sending a generic continuation."
+        },
+        "codexAutoResume.inputRecovery.userOnlyPolicy": {
+          "type": "string",
+          "enum": [
+            "review",
+            "replayStableUserOnly"
+          ],
+          "default": "review",
+          "description": "Default review requires a per-input decision when complete history contains only one user message. Opt-in replayStableUserOnly automatically replays eligible plain text after stable full snapshots; this is an evidence-based heuristic, NOT proof that execution never began. Validate your installed Codex build first."
         }
       }
     }

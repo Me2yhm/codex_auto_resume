@@ -1,3 +1,5 @@
+import type { RecoveryPlan } from "./inputRecovery";
+
 export interface RateLimitWindow {
   usedPercent: number;
   windowDurationMins: number | null;
@@ -46,6 +48,8 @@ export interface TurnError {
 }
 
 export interface CodexTurn {
+  items?: unknown[];
+  itemsView?: "full" | "summary" | "notLoaded" | null;
   id: string;
   status: string;
   error: TurnError | null;
@@ -79,6 +83,10 @@ export interface ThreadTurnsListResponse {
 }
 
 export interface ArmedResume {
+  recoveryPlan?: RecoveryPlan;
+  replayAttempts?: number;
+  replaySourceTurnId?: string;
+  replayTurnId?: string;
   threadId: string;
   cwd: string;
   armedAtMs: number;
