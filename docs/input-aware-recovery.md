@@ -190,6 +190,39 @@ The repaired classifier:
 
 The actual Windows question fields were not in the supplied redacted Inspect. Until the new build returns `questionSignals`, the specific question status remains unknown. The aim is to make this diagnosable and manually recoverable without unsafe automatic permission inference. Keep PR #4 Draft until reviewed and proven on the actual host.
 
+## Windows Local clock.sleep compatibility in second quota-failed turn (2026-10-27)
+
+A redacted live Windows Local `Inspect Recovery Input` report from `openai.chatgpt 26.1021.22027`
+showed a successfully auto-continued task doing substantial real work before exhausting quota again.
+Its latest full, failed turn contained **118 items**: one `userMessage`, 60 `reasoning`,
+11 `agentMessage`, 28 `commandExecution`, 11 `fileChange` and seven `sleep` items.
+The saved and freshly classified recovery both returned
+`needs_review / unknown_item_or_context_activity`. No independent unanswered question
+or attachment error was reported for this latest turn. The immediately preceding turn
+had already been classified as `answered_question_followed_by_execution`.
+
+The exact `sleep` type was absent from our known-history item list. Official Codex
+exposes an interruptible `clock.sleep` display item with an ID and duration. Treat
+**only** this exact item kind as known neutral wait/lifecycle metadata, like
+`contextCompaction`: it is **not** execution progress, a user instruction, an
+answer, or authorization. The ordinary recovery guard, structured Q&A
+`answeredQuestionFollowedByWork` guard and read-only interaction trace all
+recognize it consistently. Unknown item kinds still fail closed.
+
+Synthetic regressions cover seven interleaved waits and real work, user-plus-wait
+without work, an unanswered question/permission, other unknown items, steering,
+a structured answered question requiring a separate post-answer acknowledgment,
+repeat-quota replay lineage, and reclassification of a persisted `needs_review`
+without bypassing two quota observations or once-only dispatch.
+
+**Release gate:** Code/CI results do not constitute live recovery verification on
+the original Windows extension host. Do not manually replay the original input:
+a second quota interruption after work requires the normal default continuation.
+On a newly installed VSIX, verify that `Inspect Recovery Input` reclassifies
+the exact previously saved source to `continue / recorded_execution_after_input`
+(if unchanged), then verify `Show Status`, quota gating and at most one owner
+submission. Keep PR #4 Draft until this host-specific check succeeds.
+
 ## Required real-environment review
 
 Install only a review VSIX in a non-critical workspace initially. Keep `userOnlyPolicy=review`. Use `Inspect Recovery Input` for the three actual sample classes, verify original input completeness locally with `Review Recovery Input`, and confirm the official installed extension version. A real replay into the same conversation, new input during an Armed wait, reload persistence and a second quota exhaustion must be checked before broad release. Avoid manufacturing quota exhaustion or changing existing active task permissions.

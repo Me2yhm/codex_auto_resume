@@ -83,10 +83,10 @@ const PROGRESS = new Set([
   "mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "subAgentActivity",
   "webSearch", "imageView", "imageGeneration",
 ]);
-// Automatic context compaction is a known Codex lifecycle event, neither a
-// new user instruction nor positive evidence that the user request executed.
-// Unknown item kinds must continue to fail closed.
-const NEUTRAL_CONTEXT = new Set(["contextCompaction"]);
+// Known context lifecycle and clock.sleep items are neutral: neither a new
+// user instruction nor positive execution/approval evidence. Unknown kinds
+// must continue to fail closed.
+const NEUTRAL_CONTEXT = new Set(["contextCompaction", "sleep"]);
 function knownHistoryItem(item: unknown): boolean {
   return record(item) &&
     (item.type === "userMessage" || PROGRESS.has(String(item.type)) ||

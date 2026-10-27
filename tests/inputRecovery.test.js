@@ -493,6 +493,94 @@ test('answered question may cross compaction but still needs a real post-answer 
 });
 
 
+test('Windows second quota: seven clock.sleep items interleaved with real work allow Continue, not replay', () => {
+  const items = [
+    user('resumed', '继续。从中断处恢复，先检查当前工作区已有修改和上一轮状态，不要重复已经完成的工作。'),
+    { type: 'agentMessage', id: 'ack', text: '先核对工作区，继续未完成步骤。' },
+    { type: 'fileChange', id: 'first-change', status: 'completed' },
+  ];
+  for (let i = 0; i < 7; i++) {
+    items.push({ type: 'sleep', id: 'clock-wait-' + i, durationMs: 250 + i });
+    items.push({ type: 'commandExecution', id: 'check-' + i,
+      status: 'completed', command: 'run-acceptance-check-' + i });
+  }
+  const source = failed('second-quota-after-auto-continue', items);
+  const plan = classify(history(source), { policy: 'replayStableUserOnly' });
+  assert.equal(hasUnambiguousInputProgress(source), true);
+  assert.equal(plan.action, 'continue');
+  assert.equal(plan.candidate, 'continue');
+  assert.equal(plan.reason, 'recorded_execution_after_input');
+  assert.equal(plan.inputs.length, 1);
+  assert.equal(plan.evidence[0].itemTypes.filter(kind => kind === 'sleep').length, 7);
+});
+
+test('clock.sleep is neutral: it cannot prove work or trigger replay even with opt-in policy', () => {
+  const source = failed('sleep-without-execution', [
+    user('task', 'Run production acceptance.'), { type: 'sleep', id: 'waiting', durationMs: 500 },
+  ]);
+  assert.equal(hasUnambiguousInputProgress(source), false);
+  const h = history(source);
+  const first = classify(h, { policy: 'replayStableUserOnly' });
+  const later = classify(h, { previous: first,
+    policy: 'replayStableUserOnly', nowMs: NOW + 60000 });
+  for (const result of [first, later]) {
+    assert.equal(result.action, 'needs_review');
+    assert.equal(result.reason, 'incomplete_activity_evidence');
+  }
+});
+
+test('clock.sleep never overrides pending question or approval, unknown activity, or new steering', () => {
+  const base = [
+    user('original', 'Continue prior work.'),
+    { type: 'commandExecution', id: 'ran', status: 'completed' },
+    { type: 'sleep', id: 'wait', durationMs: 500 },
+  ];
+  for (const pending of [
+    { type: 'dynamicToolCall', id: 'permission',
+      tool: 'request_permissions', status: 'inProgress' },
+    { type: 'agentMessage', id: 'question', questions: [{ id: 'Q', answered: false }] },
+  ]) {
+    const source = failed('sleep-and-pending', [...base, pending]);
+    const plan = classify(history(source));
+    assert.equal(plan.action, 'needs_review');
+    assert.equal(plan.reason, 'unanswered_question_or_approval');
+    assert.equal(hasUnambiguousInputProgress(source), false);
+  }
+  const unknown = failed('sleep-and-unknown', [...base, { type: 'newFutureItem' }]);
+  assert.equal(classify(history(unknown)).reason, 'unknown_item_or_context_activity');
+  assert.equal(hasUnambiguousInputProgress(unknown), false);
+  const steered = failed('sleep-and-steering', [...base, user('new-task', 'Do something else.')]);
+  assert.equal(classify(history(steered)).reason, 'multiple_unresolved_inputs');
+  assert.equal(hasUnambiguousInputProgress(steered), false);
+  const beforeInput = failed('sleep-before-input', [
+    { type: 'sleep', durationMs: 500 }, user('task'), { type: 'commandExecution', status: 'completed' },
+  ]);
+  assert.equal(classify(history(beforeInput)).reason, 'ambiguous_steering_order');
+});
+
+test('clock.sleep may occur around answered question, but never replaces post-answer acknowledgement', () => {
+  const answered = answeredTurn();
+  answered.items.splice(3, 0, { type: 'sleep', id: 'before-reply', durationMs: 500 });
+  answered.items.splice(5, 0, { type: 'sleep', id: 'after-reply', durationMs: 500 });
+  assert.equal(hasUnambiguousInputProgress(answered), true);
+  assert.equal(classify(history(answered)).reason, 'answered_question_followed_by_execution');
+
+  const noAck = answeredTurn();
+  noAck.items.splice(4, 2, { type: 'sleep', id: 'after-reply', durationMs: 500 });
+  assert.equal(hasUnambiguousInputProgress(noAck), false);
+  assert.equal(classify(history(noAck)).action, 'needs_review');
+});
+
+test('sleep alone does not turn identical quota-only retries into continued work', () => {
+  const first = failed('original-quota', [user('old', 'Run the plan')]);
+  const second = failed('replay-quota', [
+    user('replay', 'Run the plan'), { type: 'sleep', id: 'only-wait', durationMs: 500 },
+  ]);
+  const plan = classify(history(second, first), { policy: 'replayStableUserOnly' });
+  assert.equal(plan.action, 'needs_review');
+  assert.equal(plan.reason, 'multiple_unresolved_inputs');
+});
+
 test('question with explicit resolved metadata does not block actually executed work', () => {
   const turn = failed('finished-question', [
     user('msg', 'Complete read-only checks with the attached plan.'),

@@ -23,7 +23,7 @@ const KNOWN_STATES = new Set(["pending", "waiting", "inProgress", "completed",
 const KNOWN_ITEM_TYPES = new Set(["userMessage", "agentMessage", "reasoning", "plan",
   "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall",
   "collabAgentToolCall", "subAgentActivity", "webSearch", "imageView",
-  "imageGeneration", "contextCompaction"]);
+  "imageGeneration", "contextCompaction", "sleep"]);
 // Only documented schema keys are displayed verbatim. Unknown keys may be
 // user-defined identifiers or contain private data even when syntactically
 // ordinary (e.g. "CustomerAlice123"), so hash them without exporting the key.

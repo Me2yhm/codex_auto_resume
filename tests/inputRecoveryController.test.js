@@ -764,6 +764,40 @@ test('G4 context compaction reclassifies previous unknown-item Review and sends 
   assert.equal(h.sent.length, 1);
 });
 
+test('Windows second quota with clock.sleep reclassifies saved Review and sends Continue exactly once', async t => {
+  const { recoveryFingerprint } = require('../dist/inputRecovery');
+  const source = turn('second-quota-after-resume', true);
+  source.items[0].content[0].text = 'CONTINUE_EXISTING_WORK';
+  for (let i = 0; i < 7; i++) {
+    source.items.push({ type: 'sleep', id: 'clock-' + i, durationMs: 500 });
+    source.items.push({ type: 'commandExecution', id: 'step-' + i, status: 'completed' });
+  }
+  const h = setup(t, { turns: [source], available: false, policy: 'replayStableUserOnly' });
+  const previous = {
+    version: 1, action: 'needs_review', reason: 'unknown_item_or_context_activity',
+    sourceTurnId: source.id, candidate: undefined, inputs: [], evidence: [],
+    fingerprint: recoveryFingerprint({ turns: [source], complete: true }),
+    stableSinceMs: NOW - 30_000, observedAtMs: NOW - 10_000, stale: false,
+  };
+  await h.context.workspaceState.update(KEY, { ...h.state(), recoveryPlan: previous });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'continue');
+  assert.equal(h.state().recoveryPlan.reason, 'recorded_execution_after_input');
+  assert.equal(h.state().recoveryPlan.inputs.length, 1);
+  assert.equal(h.sent.length, 0);
+
+  h.setQuota(quota(true));
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 0);
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].threadId, THREAD);
+  assert.equal(h.sent[0].prompt, 'CONTINUE_EXISTING_WORK');
+  assert.deepEqual(h.sent[0].overrides, {});
+  h.advance(10_000); await h.tick();
+  assert.equal(h.sent.length, 1);
+});
+
 test('G4 with compaction but no real executed work remains held rather than replaying authorization', async t => {
   const source = turn('g4-only-compaction');
   source.items[0].content[0].text = '授权G4';

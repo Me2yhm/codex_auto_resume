@@ -190,6 +190,22 @@ test("question diagnostics are bounded to 16 groups and 8 questions each", () =>
   checkNoSecrets(report);
 });
 
+test("clock.sleep is recognized in read-only interaction neighborhood without exposing timing or contents", () => {
+  const report = buildInteractionTrace(turn([
+    user(SECRET.prompt),
+    { type: "agentMessage", questions: [{ title: SECRET.title, id: SECRET.id }] },
+    { type: "sleep", id: "SECRET_SLEEP_ID", durationMs: 120000 },
+    { type: "commandExecution", status: "completed", command: SECRET.command },
+  ]));
+  assert.equal(report.questions.length, 1);
+  assert.equal(report.questions[0].neighborhood[2].itemType, "sleep");
+  assert.equal(report.questions[0].laterProgressItems, 1);
+  assert.equal(JSON.stringify(report).includes("durationMs"), false);
+  assert.equal(JSON.stringify(report).includes("SECRET_SLEEP_ID"), false);
+  assert.equal(report.conclusion, "question_metadata_only_cannot_prove_interaction_resolved");
+  checkNoSecrets(report);
+});
+
 test("target-turn reader uses only bounded read-only full-history calls across pages", async () => {
   const calls = [];
   const reader = {
