@@ -75,10 +75,38 @@ test("structured question ID can correlate with later reply and tool, without ex
   const question = report.questions[0];
   assert.ok(question.questionDetails[0].ids.some(id =>
     id.field === "questionItemId.call" && id.digest.startsWith("hmac-sha256:")));
-  assert.ok(question.matchingRecords.some(record => record.itemIndex === 1));
-  assert.ok(question.matchingRecords.some(record => record.itemIndex === 3));
+  const before = question.matchingRecords.find(record => record.itemIndex === 1);
+  const after = question.matchingRecords.find(record => record.itemIndex === 3);
+  assert.equal(before.relativeOrder, "before_question");
+  assert.equal(before.structuredReplyMatch, false);
+  assert.equal(before.itemType, "dynamicToolCall");
+  assert.equal(before.itemStatus, "completed");
+  assert.equal(after.relativeOrder, "after_question");
+  assert.equal(after.structuredReplyMatch, true);
+  assert.equal(after.itemType, "userMessage");
+  assert.equal(after.itemStatus, null);
   assert.ok(question.matchingRecords.every(record =>
     record.evidenceType === "identifier_match_only_not_resolution_proof"));
+  assert.equal(report.conclusion, "question_metadata_only_cannot_prove_interaction_resolved");
+  checkNoSecrets(report);
+});
+
+test("a later unrelated reply is not mistaken for resolution of a question", () => {
+  const questionId = JSON.stringify(["request_user_input_async", "call_for_question", 0]);
+  const unrelatedId = JSON.stringify(["request_user_input_async", "call_unrelated", 0]);
+  const message = "<send_user_message_question_reply>" + JSON.stringify([{
+    questionItemId: unrelatedId, question: SECRET.title, answer: SECRET.answer,
+  }]) + "</send_user_message_question_reply>";
+  const report = buildInteractionTrace(turn([
+    user(SECRET.prompt),
+    { type: "agentMessage", questions: [{ questionItemId: questionId }] },
+    user(message),
+    { type: "commandExecution", id: "later-tool", status: "completed",
+      command: SECRET.command },
+  ]));
+  assert.equal(report.questions.length, 1);
+  assert.equal(report.questions[0].matchingRecords.length, 0);
+  assert.equal(report.questions[0].unknown, 1);
   assert.equal(report.conclusion, "question_metadata_only_cannot_prove_interaction_resolved");
   checkNoSecrets(report);
 });
