@@ -505,7 +505,7 @@ export class AutoResumeController implements vscode.Disposable {
         turnsScanned: lookup.turnsScanned,
       },
       ...(lookup.turn ? { trace: buildInteractionTrace(lookup.turn) } : {}),
-      recoveryStateNote: "No recovery action, quota availability, attachment hash or persisted Armed state was inspected or modified.",
+      recoveryStateNote: "Read-only workspace recovery metadata was used solely to identify the exact source turn. Armed state, approvals, dispatch claims and quotas were not modified; no message was sent.",
     };
     const doc = await vscode.workspace.openTextDocument({
       language: "json", content: JSON.stringify(report, null, 2),
