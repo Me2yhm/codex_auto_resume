@@ -386,9 +386,17 @@ export function canManuallyConfirmQuestionContinuation(turn: CodexTurn): boolean
   const users = items.filter(item => record(item) && item.type === "userMessage");
   if (users.length !== 1 || items[0] !== users[0] ||
       !items.every(knownHistoryItem)) return false;
+  // Only the diagnostic display is capped at 16 question groups. Safety
+  // decisions must scan the entire turn, including later permission requests.
   const signals = questionSignals(items);
-  if (!signals.some(signal => signal.unknown > 0) ||
-      signals.some(signal => signal.pendingTool || signal.explicitlyPending > 0)) return false;
+  if (!signals.some(signal => signal.unknown > 0)) return false;
+  for (const item of items) {
+    if (!record(item)) continue;
+    if (item.type === "dynamicToolCall" &&
+        QUESTION_TOOLS.has(String(item.tool)) && item.status !== "completed") return false;
+    if (Array.isArray(item.questions) &&
+        item.questions.some(question => questionState(question) === "pending")) return false;
+  }
   return true;
 }
 

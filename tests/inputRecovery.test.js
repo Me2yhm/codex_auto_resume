@@ -624,6 +624,32 @@ test('manual Continue must be invalidated by changed or newly pending question e
   assert.equal(after.reason, 'unanswered_question_or_approval');
 });
 
+test('manual question Continue rejects pending interactions beyond the 16-group diagnostic limit', () => {
+  const initialItems = [
+    user('task'),
+    { type: 'commandExecution', id: 'worked', status: 'completed' },
+    ...Array.from({ length: 16 }, (_, i) => ({
+      type: 'agentMessage', id: 'ambiguous-' + i, questions: [{ id: 'Q' + i }],
+    })),
+  ];
+  assert.equal(questionSignals(initialItems).length, 16);
+  assert.equal(canManuallyConfirmQuestionContinuation(failed('ambiguous', initialItems)), true);
+
+  const withPendingTool = failed('pending-tool', [
+    ...initialItems, { type: 'dynamicToolCall',
+      tool: 'request_permissions', status: 'inProgress', id: 'new-pending-approval' },
+  ]);
+  assert.equal(questionSignals(withPendingTool.items).length, 16);
+  assert.equal(canManuallyConfirmQuestionContinuation(withPendingTool), false);
+
+  const withPendingQuestion = failed('pending-question', [
+    ...initialItems, { type: 'agentMessage',
+      questions: [{ id: 'Q17', answered: false }] },
+  ]);
+  assert.equal(questionSignals(withPendingQuestion.items).length, 16);
+  assert.equal(canManuallyConfirmQuestionContinuation(withPendingQuestion), false);
+});
+
 test('manual question fallback rejects an explicit pending question, unknown activity or extra user steer', () => {
   const base = [user('task'),
     { type: 'agentMessage', id: 'q', questions: [{ id: 'Q' }] },

@@ -52,7 +52,9 @@ test("G4-like question indices 12 and 86 show metadata only, no request content"
   assert.ok(report.questions[0].laterProgressItems > 0);
   assert.equal(report.questions[0].matchingRecords.length, 0);
   assert.equal(report.conclusion, "question_metadata_only_cannot_prove_interaction_resolved");
-  assert.ok(report.questions[0].questionDetails[0].fields.some(x => x.field === "opaqueInfo"));
+  assert.ok(report.questions[0].questionDetails[0].fields.some(x =>
+    x.field.startsWith("field_hmac-sha256:") && x.type === "object"));
+  assert.equal(JSON.stringify(report).includes("opaqueInfo"), false);
   assert.ok(report.questions[0].questionDetails[0].fields.some(x => x.field === "title" && x.type === "string"));
   assert.equal(report.questions[1].neighborhood.length, 7);
   checkNoSecrets(report);
@@ -141,6 +143,22 @@ test("unknown item types and sensitive-looking field names are not exposed", () 
   assert.equal(JSON.stringify(report).includes("SECRET_UNKNOWN_DYNAMIC_ITEM_TYPE"), false);
   assert.equal(JSON.stringify(report).includes("password_SECRET_KEY"), false);
   assert.equal(JSON.stringify(report).includes("SECRET_LOW_ENTROPY_ID"), false);
+  checkNoSecrets(report);
+});
+
+test("unknown identifier-shaped field keys are HMAC-tagged, never disclosed", () => {
+  const privateFieldKey = "CustomerAliceFinancialAccount123";
+  const report = buildInteractionTrace(turn([
+    user(SECRET.prompt),
+    { type: "agentMessage", questions: [{
+      title: SECRET.title, [privateFieldKey]: SECRET.answer,
+    }] },
+  ]));
+  const fields = report.questions[0].questionDetails[0].fields;
+  assert.ok(fields.some(x => x.field === "title" && x.type === "string"));
+  assert.ok(fields.some(x =>
+    x.field.startsWith("field_hmac-sha256:") && x.type === "string"));
+  assert.equal(JSON.stringify(report).includes(privateFieldKey), false);
   checkNoSecrets(report);
 });
 

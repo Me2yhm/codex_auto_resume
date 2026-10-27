@@ -24,7 +24,17 @@ const KNOWN_ITEM_TYPES = new Set(["userMessage", "agentMessage", "reasoning", "p
   "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall",
   "collabAgentToolCall", "subAgentActivity", "webSearch", "imageView",
   "imageGeneration", "contextCompaction"]);
-const fieldOK = /^[a-zA-Z_][a-zA-Z0-9_]{0,47}$/;
+// Only documented schema keys are displayed verbatim. Unknown keys may be
+// user-defined identifiers or contain private data even when syntactically
+// ordinary (e.g. "CustomerAlice123"), so hash them without exporting the key.
+const SAFE_FIELD_KEYS = new Set([
+  "type", "status", "state", "questions", "question", "questionItemId",
+  "title", "label", "text", "content", "answer", "choices", "options",
+  "id", "requestId", "request_id", "callId", "call_id", "toolCallId",
+  "tool_call_id", "serverRequestId", "request", "response", "resolution",
+  "metadata", "result", "tool", "completed", "pending", "answered",
+  "resolved", "isAnswered", "isResolved", "command", "error",
+]);
 // A non-exported, process-local salt prevents offline guesses of short IDs
 // such as Q1. The key is deliberately NOT emitted in the diagnostic report.
 const TRACE_HMAC_KEY = randomBytes(32);
@@ -38,9 +48,7 @@ function digest(v: string): string {
 function redactedField(k: string): string {
   // Arbitrary JSON object keys may contain private data. Common schema keys
   // are useful, but non-schema keys are represented by a one-way digest.
-  return fieldOK.test(k) && k.length <= 48 &&
-    !/(password|secret|token|cookie|private|credential|apiKey)/i.test(k)
-    ? k : "field_" + digest(k);
+  return SAFE_FIELD_KEYS.has(k) ? k : "field_" + digest(k);
 }
 function kind(v: unknown): string {
   if (v === null) return "null";
