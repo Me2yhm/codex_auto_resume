@@ -1,6 +1,6 @@
 # v0.3.11 input-aware quota recovery — implementation and review guide
 
-Status: implemented on `feature/input-aware-quota-recovery`, draft PR #4. Not merged or released. Base: main `951d9dd40ca88fd0cf7ca457dfb36cd5a6a4c2c3` (0.3.10).
+Status (2026-11-03): merged via PR #4 into `main` at merge commit `1a81bd96f20709d2404e3223430ab5cb2be65a3e`, v0.3.11. User confirmed Windows Local live acceptance. The v0.3.11 VSIX is distributed via successful main-branch CI artifact (not GitHub Release or Marketplace). Historical dated milestones below retain their contemporaneous pre-merge language and are not current release blockers.
 
 ## What changed
 
@@ -223,8 +223,8 @@ the exact previously saved source to `continue / recorded_execution_after_input`
 (if unchanged), then verify `Show Status`, quota gating and at most one owner
 submission. Keep PR #4 Draft until this host-specific check succeeds.
 
-## Required real-environment review
+## Post-merge validation and constraints (2026-11-03)
 
-Install only a review VSIX in a non-critical workspace initially. Keep `userOnlyPolicy=review`. Use `Inspect Recovery Input` for the three actual sample classes, verify original input completeness locally with `Review Recovery Input`, and confirm the official installed extension version. A real replay into the same conversation, new input during an Armed wait, reload persistence and a second quota exhaustion must be checked before broad release. Avoid manufacturing quota exhaustion or changing existing active task permissions.
+The user reports Windows Local end-to-end acceptance PASSED, including the second-quota `sleep` recovery case. The feature CI #280 completed successfully: 355 passed / 1 skipped on Linux, 199 targeted tests passed on Windows, typechecks and VSIX package passed. This cleared the agreed merge gate; PR #4 was merged on 2026-11-03. The main-branch CI VSIX artifact is the supported distribution for this project.
 
-Until these checks and independent code review pass, PR #4 stays Draft. Main and the stable 0.3.10 build are unchanged. No claim is made that all installed Codex versions can be classified automatically or that every attachment/approval type is supported.
+Continue using `userOnlyPolicy=review` unless the user intentionally enables the documented heuristic for an already validated build. Keep unknown history items, unresolved question/approval, non-replayable attachments, source edits and ambiguous delivery fail-closed. Revalidate any new official extension version or new host environment independently; Windows Local acceptance is not proof of all Remote or future-version behavior. Do not manufacture quota exhaustion or automatically grant permissions.

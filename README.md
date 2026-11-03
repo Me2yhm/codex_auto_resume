@@ -13,7 +13,17 @@ The implementation has two independent automation paths:
 - **Auto Resume** monitors Codex quota/thread state, persists a work turn with a structured quota error, confirms quota availability through two independent reads at least 10 seconds apart, and resumes the exact conversation through official Codex UI IPC. Confirmed availability can resume work before the expected reset time; the resumed turn is verified before disarming.
 - **Quota Window Primer** tracks primary/secondary rolling reset boundaries and, when a reset would otherwise remain dormant, sends one tiny request in a dedicated persistent low-cost-model thread so the next rolling window starts immediately.
 
-## v0.3.10 changes and review status
+## Current version: v0.3.11 (2026-11-03)
+
+- Merged [PR #4](https://github.com/Me2yhm/codex_auto_resume/pull/4) to `main` with a merge commit after user-confirmed Windows Local live acceptance and successful [feature CI #280](https://github.com/Me2yhm/codex_auto_resume/actions/runs/40518511035).
+- Input-aware quota recovery chooses `continue`, `replay_input` or `needs_review` from full history; avoids duplicate sends and preserves user input, with strict permission and attachment checks. Includes structural Inspect and read-only historical question diagnostics.
+- Known `clock.sleep` and `contextCompaction` items are treated as neutral metadata; pending approvals, unknown events and insufficient execution evidence remain blocked. The optional automatic user-only replay policy is not enabled by default.
+- **Distribution:** download the `codex-auto-resume-vsix` artifact from a successful [main-branch CI run](https://github.com/Me2yhm/codex_auto_resume/actions/workflows/ci.yml). There is no configured GitHub Release, Git tag or VS Code Marketplace publishing flow. The published VSIX requires installation and a VS Code window reload.
+- **Validation scope:** Windows Local acceptance is confirmed by the user; regression suites and CI are separate evidence. Official Codex UI attachment transport is only allowed for versions with a validated IPC contract; other versions fail closed.
+
+See [README.extension.md](README.extension.md) for current user-facing instructions and [docs/input-aware-recovery.md](docs/input-aware-recovery.md) for evidence and limitations.
+
+## v0.3.10 historical changes and review status
 
 - Both modules share a fail-closed quota classifier. Network errors, malformed responses, and contradictory quota fields do not permit a send. An account quota blocker alone never makes a manual Stop eligible for Auto Resume; a structured quota error on the work turn is required.
 - Work recovery has priority over Primer across VS Code windows sharing one host's extension storage. Pending, Armed, and Verifying work suppress Primer sends while quota monitoring continues.
@@ -22,7 +32,7 @@ The implementation has two independent automation paths:
 - Reset Primer Thread preserves known conversation IDs and unresolved confirmations. A bounded history of 256 IDs and trusted Primer metadata keep historical Primer conversations out of work discovery; ordinary work titles containing “Primer” remain eligible.
 - Work conversations keep their original model and reasoning settings. The official UI owner route and Remote proxy resolution remain unchanged.
 
-This version is prepared for Code Review. Local VSIX installation/UI smoke and real Remote SSH proxy, reload, and recovery smoke remain outstanding; deterministic automated tests do not replace those checks. Merge and release follow review and validation. To roll back, disable both features, inspect and resolve any unconfirmed continuation, then reinstall the 0.3.9 VSIX before re-enabling automation.
+Historical v0.3.10 review note (before that version was merged): Local VSIX installation/UI smoke and Remote SSH recovery smoke were listed as outstanding at the time. These requirements must not be confused with the current v0.3.11 release status. To roll back, inspect and resolve any unconfirmed continuation first; older builds may not recognize newer persisted recovery state.
 
 Same-host coordination covers windows sharing extension storage on the same Local or Remote host. It does not coordinate different physical hosts or separate storage profiles. For one Codex account, enable automatic Primer in one designated Local or Remote environment only.
 

@@ -2,7 +2,7 @@
 
 Codex Auto Resume is a companion extension for the official OpenAI Codex VS Code extension.
 
-## v0.3.11 review build: input-aware recovery
+## v0.3.11: input-aware recovery
 
 This build adds a recovery-content decision to the existing Auto Resume flow. It is not a new task queue or an independent writer for work conversations.
 
@@ -37,7 +37,7 @@ Images, skills, unsupported attachments, multiple content parts, multiple unreso
 
 Turning the input-aware setting off cannot bypass an already-saved recovery plan. Do not disable Auto Resume or downgrade while an important input/dispatch remains unresolved: first inspect it and retain any needed content in a safe location.
 
-Real Local/Remote full-history classification and replay acceptance are still review gates. The stable main version remains 0.3.10 until the draft feature PR is reviewed and merged.
+v0.3.11 was merged into `main` through PR #4 after the user confirmed live Windows Local acceptance and CI passed. This project's current distribution channel is the `codex-auto-resume-vsix` GitHub Actions artifact from `main`; a GitHub Release, version tag, or VS Code Marketplace upload is not configured. Continue using `review` as the conservative default and revalidate compatibility with any new official Codex build.
 
 ## Features
 
@@ -339,6 +339,8 @@ Quota Primer:
 - does not bypass approval prompts;
 - uses a prompt that explicitly forbids file inspection, tools, and modifications.
 
-## Review status
+## Release and compatibility status
 
-Version 0.3.11 adds input-aware recovery on top of the merged 0.3.10 baseline. Deterministic tests do not replace real full-history inspection of the installed official Codex build. Keep the default review policy until that evidence and the draft PR have been reviewed. Rollback requires resolving/copying saved user input and any uncertain sends first; the older version does not understand input recovery plans.
+v0.3.11 is merged into `main` (PR #4, 2026-11-03). It adds input-aware recovery, native pasted-TXT handling for the inspected UI IPC version, and read-only interaction diagnostics on top of v0.3.10. The final functional-branch CI #280 passed (Linux 355 pass / 1 skip; Windows targeted 199 pass), and the user confirmed Windows Local live acceptance. The `main` VSIX artifact is the release distribution mechanism; it is not automatically installed into VS Code or published to the Marketplace.
+
+Automatic replay remains intentionally conservative: `review` is the default. Compatibility of internal official UI IPC attachment transport is version-specific and still fails closed on unknown versions. A `sleep` history item is neutral waiting metadata, never execution or authorization proof. Live acceptance of one host does not validate all other environments. Before rolling back, resolve or copy saved user input and any uncertain sends, since v0.3.10 cannot interpret v0.3.11 recovery plans.
