@@ -18,7 +18,7 @@ export interface CodexRpcClientInfo {
 const DEFAULT_CLIENT_INFO: CodexRpcClientInfo = {
   name: "codex-auto-resume",
   title: "Codex Auto Resume",
-  version: "0.3.9",
+  version: "0.3.11",
 };
 
 export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
@@ -34,6 +34,10 @@ export class CodexRpcClient extends EventEmitter implements vscode.Disposable {
     private readonly clientInfo: CodexRpcClientInfo = DEFAULT_CLIENT_INFO,
   ) {
     super();
+    // All child clients belong to this extension, including the dedicated
+    // Primer writer. Avoid stale caller literals in diagnostics after upgrades.
+    this.clientInfo = { ...clientInfo, version:
+      vscode.extensions?.getExtension("me2yhm.codex-auto-resume")?.packageJSON?.version ?? DEFAULT_CLIENT_INFO.version };
   }
 
   get isRunning(): boolean {

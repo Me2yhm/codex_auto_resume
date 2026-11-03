@@ -24,11 +24,21 @@ interface PendingRequest {
 export interface CodexUiIpcVersions {
   ownerDiscovery: number;
   startTurn: number;
+  /** True only for the inspected official bundle whose UI IPC v2 attachment shape was verified. */
+  supportsPastedTextAttachments?: boolean;
+}
+
+export interface CodexUiPastedTextAttachment {
+  label: string;
+  path: string;
+  fsPath: string;
+  isPastedText: true;
 }
 
 export interface CodexTurnStartOverrides {
   model?: string;
   effort?: string;
+  attachments?: CodexUiPastedTextAttachment[];
 }
 
 export class CodexUiIpcRequestError extends Error {
@@ -58,10 +68,12 @@ export function readCodexUiIpcVersions(output: vscode.OutputChannel): CodexUiIpc
   const ownerDiscovery = extractMethodVersion(source, "thread-owner-discovery");
   const startTurn = extractMethodVersion(source, "thread-follower-start-turn");
 
+  const supportsPastedTextAttachments =
+    packageJson.version === "26.1007.21434" && startTurn === 2;
   output.appendLine(
-    `[ui-ipc] openai.chatgpt ${packageJson.version ?? "unknown"}; thread-owner-discovery=v${ownerDiscovery}; thread-follower-start-turn=v${startTurn}`,
+    `[ui-ipc] openai.chatgpt ${packageJson.version ?? "unknown"}; thread-owner-discovery=v${ownerDiscovery}; thread-follower-start-turn=v${startTurn}; pasted-TXT-context=${supportsPastedTextAttachments ? "verified-for-this-version" : "unsupported-or-unverified"}`,
   );
-  return { ownerDiscovery, startTurn };
+  return { ownerDiscovery, startTurn, supportsPastedTextAttachments };
 }
 
 function extractMethodVersion(source: string, method: string): number {
@@ -165,6 +177,19 @@ export class CodexUiIpcClient implements vscode.Disposable {
     knownOwnerClientId?: string,
     overrides: CodexTurnStartOverrides = {},
   ): Promise<void> {
+    const attachments = overrides.attachments ?? [];
+    if (attachments.length > 0) {
+      if (versions.supportsPastedTextAttachments !== true) {
+        throw new CodexUiIpcRequestError("pasted-text-attachments-unsupported", "thread-follower-start-turn");
+      }
+      for (const attachment of attachments) {
+        if (!attachment.label.trim() || !path.isAbsolute(attachment.path) ||
+            attachment.fsPath !== attachment.path || !/\.txt$/i.test(attachment.path) ||
+            attachment.isPastedText !== true) {
+          throw new CodexUiIpcRequestError("invalid-pasted-text-attachment", "thread-follower-start-turn");
+        }
+      }
+    }
     await this.connect();
 
     const ownerClientId = knownOwnerClientId ?? await this.discoverOwner(threadId, versions.ownerDiscovery);
@@ -185,7 +210,10 @@ export class CodexUiIpcClient implements vscode.Disposable {
             ...(overrides.model ? { model: overrides.model } : {}),
             ...(overrides.effort ? { effort: overrides.effort } : {}),
           },
-          context: { inheritThreadSettings: true },
+          context: {
+            inheritThreadSettings: true,
+            ...(attachments.length > 0 ? { attachments } : {}),
+          },
         },
       },
       ownerClientId,
