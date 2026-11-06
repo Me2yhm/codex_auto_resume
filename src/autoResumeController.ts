@@ -1447,7 +1447,7 @@ export class AutoResumeController implements vscode.Disposable {
     let cursor: string | null = null;
     const seen = new Set<string>();
     for (let page = 0; page < 20; page++) {
-      const response = await this.client!.request<ThreadListResponse>("thread/list", {
+      const response: ThreadListResponse = await this.client!.request<ThreadListResponse>("thread/list", {
         limit: 100, sortKey: "updated_at", sortDirection: "desc",
         sourceKinds: ["vscode"], archived: false, ...(cursor ? { cursor } : {}),
       });
@@ -1482,10 +1482,10 @@ export class AutoResumeController implements vscode.Disposable {
           this.output.appendLine(`[auto-resume] saved window-visible quota-failed thread ${thread.id}; action=${record.recoveryPlan.action}`);
         }
       }
-      const nextCursor = response.nextCursor;
+      const nextCursor: string | null = response.nextCursor;
       if (!nextCursor || seen.has(nextCursor)) break;
       cursor = nextCursor;
-      seen.add(cursor);
+      seen.add(nextCursor);
     }
   }
 
