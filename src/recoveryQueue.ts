@@ -12,7 +12,8 @@ function isArmedResume(value: unknown): value is ArmedResume {
     typeof item.armedAtMs === "number" && Number.isFinite(item.armedAtMs) &&
     typeof item.resetAtMs === "number" && Number.isFinite(item.resetAtMs) &&
     ["usageLimitExceeded", "rateLimitExceeded", "rateLimitReached"].includes(String(item.reason)) &&
-    (item.interruptedTurnId === undefined || typeof item.interruptedTurnId === "string");
+    (item.interruptedTurnId === undefined || typeof item.interruptedTurnId === "string") &&
+    (item.windowScoped === undefined || item.windowScoped === true);
 }
 
 /** Invalid persisted data fails closed rather than silently losing saved input. */
