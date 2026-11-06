@@ -53,6 +53,7 @@ function harness(t, options = {}) {
   const h = createControllerHarness({
     workspaceState: shared,
     send: options.send,
+    quickPickIndex: options.quickPickIndex,
     request(method, params) {
       if (method === "account/rateLimits/read") return rateLimits(false);
       if (method === "thread/list") return { data: [A, B, C].map((id, i) => ({
@@ -187,4 +188,34 @@ test("another window cannot dispatch an active multi-session target absent from 
   assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, A);
   assert.equal(h.sends.length, 0);
   assert.ok(h.logs.every(line => !line.includes("confirmed quota recovery for " + A)));
+});
+
+test("Review explicitly selects a queued conversation without losing the outgoing active record", async (t) => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = harness(t, {
+    active: recovery(A, { recoveryPlan: plan("needs_review") }),
+    backlog: [recovery(B, { recoveryPlan: plan("needs_review") })],
+    windowTabs: [A, B],
+    quickPickIndex: 1,
+  });
+  assert.equal(await h.controller.selectRecoveryForReview(), true);
+  assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, B);
+  assert.deepEqual(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY).map(item => item.threadId), [A]);
+  assert.equal(h.sends.length, 0);
+  assert.ok(h.vscode.messages.some(entry => entry.type === "quick-pick" && entry.message === B));
+});
+
+test("Review cannot switch from an ambiguous in-flight continuation", async (t) => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = harness(t, {
+    active: recovery(A, {
+      dispatchPending: { beforeTurnId: `failed-${A}`, sentAtMs: NOW },
+    }),
+    backlog: [recovery(B)],
+    windowTabs: [A, B],
+  });
+  assert.equal(await h.controller.selectRecoveryForReview(), false);
+  assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, A);
+  assert.equal(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY)[0].threadId, B);
+  assert.equal(h.sends.length, 0);
 });
