@@ -1548,10 +1548,12 @@ export class AutoResumeController implements vscode.Disposable {
   ): Promise<{ thread: CodexThread; turn: CodexTurn; reason: ArmedResume["reason"] } | undefined> {
     const thread = await this.findMostRecentThread();
     if (!thread) return undefined;
-    // Only tabs from this exact VS Code window qualify for new automatic
-    // discovery. The older cwd-only lookup is retained for mock/legacy hosts
-    // that do not expose the tab groups API, never for real VS Code windows.
-    if (vscode.window.tabGroups && !this.windowConversationIds().has(thread.id.toLowerCase())) {
+    // Existing single-target monitoring remains compatible with official
+    // sidebar-only Codex sessions (which may not expose any custom editor tab).
+    // When THIS window does have Codex editor tabs, never select a different
+    // window's recent thread merely because it shares the workspace cwd.
+    const localTabs = this.windowConversationIds();
+    if (vscode.window.tabGroups && localTabs.size > 0 && !localTabs.has(thread.id.toLowerCase())) {
       return undefined;
     }
 
