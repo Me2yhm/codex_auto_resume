@@ -36,6 +36,8 @@ jobs:
           tests/inputRecoveryController.test.js
           tests/recoveryInteractionTrace.test.js
           tests/autoResumeSafetyReview.test.js
+          tests/autoResumeCoordination.test.js
+          tests/multiSessionRecovery.test.js
           tests/officialCodexUiRegression.test.js
       - if: runner.os == 'Linux'
         run: npx --yes @vscode/vsce@3.6.0 package --readme-path README.extension.md --out codex-auto-resume.vsix
