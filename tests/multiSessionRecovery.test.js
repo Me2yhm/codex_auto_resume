@@ -241,3 +241,27 @@ test("a collected multi-session candidate records its window-scoped dispatch gua
   assert.equal(entry.threadId, B);
   assert.equal(entry.windowScoped, true);
 });
+
+test("legacy single-target recovery still arms quota-failed sidebar-only work when no editor tabs exist", async (t) => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = harness(t, {
+    workspaceState: createMemoryMemento(),
+    windowTabs: [],
+  });
+  await h.tick();
+  assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, A);
+  assert.equal(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY), undefined);
+  assert.equal(h.sends.length, 0);
+});
+
+test("an open editor in this window prevents the legacy newest-thread lookup from arming another tab", async (t) => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = harness(t, {
+    workspaceState: createMemoryMemento(),
+    windowTabs: [B],
+  });
+  await h.tick();
+  assert.equal(h.context.workspaceState.get(ARMED_KEY), undefined);
+  assert.deepEqual(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY).map(x => x.threadId), [B]);
+  assert.equal(h.sends.length, 0);
+});
