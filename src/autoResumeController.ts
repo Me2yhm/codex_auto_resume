@@ -462,7 +462,20 @@ export class AutoResumeController implements vscode.Disposable {
   /** Opens a local untitled diagnostic, never logs prompt text or executes a turn. */
   async inspectRecoveryInput(): Promise<void> {
     await this.ensureClient();
-    const armed = this.armed();
+    const active = this.armed();
+    const backlog = this.backlog();
+    const ids = this.windowConversationIds();
+    const choices = [...(active ? [active] : []), ...backlog]
+      .filter(item => ids.has(item.threadId.toLowerCase()));
+    let armed = active;
+    if (choices.length > 1 || (!active && choices.length === 1)) {
+      const picked = await vscode.window.showQuickPick(choices.map(item => ({
+        label: item.threadId,
+        description: item.threadId === active?.threadId ? "Current recovery" : "Saved in backlog",
+      })), { placeHolder: "Inspect input from which saved Codex conversation?" });
+      if (!picked) return;
+      armed = choices.find(item => item.threadId === picked.label);
+    }
     const threadId = armed?.threadId ?? (await this.findMostRecentThread())?.id;
     if (!threadId) {
       void vscode.window.showWarningMessage("No workspace work thread is available for input inspection.");
@@ -484,7 +497,8 @@ export class AutoResumeController implements vscode.Disposable {
       autoResumeExtensionVersion: this.context.extension?.packageJSON?.version ?? "unknown",
       ...recoveryDiagnostic(plan),
       persistedRecovery: armed ? {
-        phase: armed.dispatchPending ? "dispatch_pending" : armed.resumeTurnId ? "verifying" : armed.recoveryPlan ? "armed" : "classifying",
+        phase: active?.threadId !== armed.threadId ? "queued"
+          : armed.dispatchPending ? "dispatch_pending" : armed.resumeTurnId ? "verifying" : armed.recoveryPlan ? "armed" : "classifying",
         interruptedTurnId: armed.interruptedTurnId,
         action: armed.recoveryPlan?.action ?? null,
         reason: armed.recoveryPlan?.reason ?? null,
