@@ -1679,7 +1679,16 @@ export class AutoResumeController implements vscode.Disposable {
       return;
     }
     const armed = this.armed();
-    const queued = this.backlog().length;
+    let queued: number;
+    try {
+      queued = this.backlog().length;
+    } catch {
+      // Damaged state must not crash extension activation or be silently
+      // discarded. Show a warning and leave the saved bytes untouched.
+      this.statusBar.text = "$(warning) Codex Resume: Queue Invalid";
+      this.statusBar.tooltip = "Saved recovery backlog is invalid; no automatic recovery will run. Inspect Output.";
+      return;
+    }
     if (!armed) {
       const pending = this.pendingQuotaCandidate();
       if (pending) {
