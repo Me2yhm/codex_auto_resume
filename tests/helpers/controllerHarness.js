@@ -40,9 +40,17 @@ function createVscodeMock(options = {}) {
     },
   });
 
+  const TabInputCustom = class {
+    constructor(id) {
+      this.viewType = "chatgpt.conversationEditor";
+      this.uri = { scheme: "openai-codex", authority: "route", path: `/local/${id}` };
+    }
+  };
+
   return {
     configuration,
     statusBars,
+    TabInputCustom,
     messages,
     executedCommands: commands,
     StatusBarAlignment: { Left: 1, Right: 2 },
