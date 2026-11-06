@@ -52,6 +52,7 @@ function harness(t, options = {}) {
   });
   const h = createControllerHarness({
     workspaceState: shared,
+    send: options.send,
     request(method, params) {
       if (method === "account/rateLimits/read") return rateLimits(false);
       if (method === "thread/list") return { data: [A, B, C].map((id, i) => ({
@@ -153,4 +154,37 @@ test("a corrupt backlog fails closed and does not send any continuation", async 
   assert.equal(h.sends.length, 0);
   assert.equal(state.get(RECOVERY_BACKLOG_KEY).length, 1);
   assert.ok(h.logs.some(line => /Invalid.*recovery record/.test(line)));
+});
+
+test("definitive no-owner defers one conversation without losing its saved input or blocking another", async (t) => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = harness(t, {
+    active: recovery(A),
+    backlog: [recovery(B)],
+    windowTabs: [A, B],
+    send: async () => false,
+  });
+  await h.controller.ensureClient();
+  await h.controller.tryAutomaticResume(h.context.workspaceState.get(ARMED_KEY));
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.context.workspaceState.get(ARMED_KEY), undefined);
+  assert.deepEqual(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY).map(entry => entry.threadId), [B, A]);
+  assert.equal(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY)[1].dispatchPending, undefined);
+  await h.tick();
+  assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, B);
+  assert.deepEqual(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY).map(entry => entry.threadId), [A]);
+  assert.equal(h.sends.length, 1, "new target must independently confirm available quota");
+});
+
+test("another window cannot dispatch an active multi-session target absent from its local editors", async (t) => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = harness(t, {
+    active: recovery(A, { recoveryPlan: plan("continue") }),
+    backlog: [recovery(B)],
+    windowTabs: [B],
+  });
+  await h.tick();
+  assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, A);
+  assert.equal(h.sends.length, 0);
+  assert.ok(h.logs.every(line => !line.includes("confirmed quota recovery for " + A)));
 });
