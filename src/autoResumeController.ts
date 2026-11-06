@@ -1116,9 +1116,23 @@ export class AutoResumeController implements vscode.Disposable {
     if (!sent) {
       await claim.releaseUnsent();
       if (this.canMonitor() && this.armed()?.dispatchPending?.sentAtMs === pending.dispatchPending!.sentAtMs) {
-        await this.saveArmed({ ...pending, replayAttempts: armed.replayAttempts, dispatchPending: undefined });
+        const deferred: ArmedResume = { ...pending, replayAttempts: armed.replayAttempts, dispatchPending: undefined };
+        const ids = this.windowConversationIds();
+        const backlog = this.backlog();
+        const anotherReady = backlog.some(item => ids.has(item.threadId.toLowerCase()) &&
+          item.threadId !== armed.threadId && item.recoveryPlan?.action !== "needs_review" &&
+          !item.dispatchPending && !item.resumeTurnId);
+        if (anotherReady) {
+          // Definitive no-owner is known-unsent. Yield so another independent
+          // conversation can proceed, but do not drop the original recovery.
+          await this.saveBacklog([...backlog.filter(item => item.threadId !== armed.threadId), deferred]);
+          await this.saveArmed(undefined);
+          this.output.appendLine(`[auto-resume] no UI owner for ${armed.threadId}; deferred it behind another window-visible recovery`);
+        } else {
+          await this.saveArmed(deferred);
+          this.output.appendLine(`[auto-resume] no active UI owner for ${armed.threadId}; keeping thread armed for a confirmed retry`);
+        }
       }
-      this.output.appendLine(`[auto-resume] no active UI owner for ${armed.threadId}; keeping thread armed for a confirmed retry`);
       return;
     }
     const resumedTurn = await this.waitForNewTurn(armed.threadId, before.id, "auto-resume", pending.dispatchPending!.sentAtMs);
