@@ -219,3 +219,25 @@ test("Review cannot switch from an ambiguous in-flight continuation", async (t) 
   assert.equal(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY)[0].threadId, B);
   assert.equal(h.sends.length, 0);
 });
+
+test("a queued window-scoped conversation cannot dispatch after its tab moves out of the window", async (t) => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = harness(t, {
+    active: recovery(B, { windowScoped: true }),
+    windowTabs: [A],
+  });
+  await h.controller.ensureClient();
+  await h.controller.tryAutomaticResume(h.context.workspaceState.get(ARMED_KEY));
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, B);
+  assert.ok(h.logs.some(line => line.includes("no longer open here")));
+});
+
+test("a collected multi-session candidate records its window-scoped dispatch guard", async (t) => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = harness(t, { windowTabs: [A, B] });
+  await h.tick();
+  const entry = h.context.workspaceState.get(RECOVERY_BACKLOG_KEY)[0];
+  assert.equal(entry.threadId, B);
+  assert.equal(entry.windowScoped, true);
+});
