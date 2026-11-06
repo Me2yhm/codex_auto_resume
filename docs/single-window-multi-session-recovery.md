@@ -1,0 +1,44 @@
+# Single-window multi-session recovery (development branch)
+
+Status: **experimental; do not release or merge until native Windows acceptance passes**.
+
+## Scope
+
+The new backlog contains multiple quota-failed work conversations observed as **open Codex custom editor tabs in this VS Code window**. It does not attempt to orchestrate work in separate VS Code windows, workspaces, local/SSH extension hosts, or accounts. The existing same-host dispatch claim and Quota Primer priority registry remain shared safety measures, not a global task queue.
+
+The extension cannot prove window ownership from `thread/list` or `cwd` alone. Consequently, additional conversations are discovered only when a matching `chatgpt.conversationEditor` tab has an `openai-codex://route/local/<threadId>` URI in `vscode.window.tabGroups`. Some official Codex sidebar-only sessions may not have such editor tabs and **will not be queued automatically** by this version. Such sessions retain the pre-existing single-target behavior, subject to the recorded target's safety conditions. Do not advertise generic sidebar-only session discovery as supported.
+
+## State and migration
+
+- `codexAutoResume.armed` remains the legacy active recovery record.
+- `codexAutoResume.pendingQuotaCandidate` remains the legacy pending quota candidate.
+- `codexAutoResume.recoveryBacklog.v1` stores up to 64 additional `ArmedResume` records, keyed by their unique `threadId`.
+- Each record retains its original source turn and input-aware recovery plan (including original evidence and attachment integrity).
+- Invalid/duplicate persisted entries cause a **fail-closed** error, not silent deletion or unsafe dispatch.
+- Both current and backlog records are preserved on VS Code reload. A backlog entry not open in the current window remains saved but cannot be selected automatically until its editor is opened.
+- If `workspaceState` is shared by two windows opened on exactly the same workspace, the state may be visible to both; **window-local open-editor evidence is required for new multi-session candidates and queue promotion**. This is not a replacement for an authoritative official window-to-thread owner API. Do not treat this as a formally proven durable per-window storage namespace.
+
+## Dispatcher
+
+- Existing active recovery remains authoritative until its dispatch is resolved or is safely moved to the backlog.
+- An active `needs_review` target yields to a safe backlog target rather than starving other conversations.
+- On definitive `no-client-found` (nothing sent), an active target yields behind other eligible open-window targets. Ambiguous delivery or an outstanding dispatch **never** yields in this manner.
+- Recovery submissions remain sequential in the controller, with at least two independent available-quota reads (10 seconds apart), input fingerprint/attachment validation, and same-host durable dispatch protection for every message.
+- A resumed turn must be verified before it is disarmed; an interrupted resumed turn can re-arm its exact conversation.
+- UI Review offers a conversation picker for saved, open-window entries; an unresolved dispatch cannot be switched away.
+- Quota Primer gives way to outstanding backlog work through the existing same-host recovery registry.
+
+## Validation
+
+Run `npm ci && npm test` on Linux and the targeted Windows CI suite. Test cases cover queue input validation, visible-thread discovery, same-cwd nonvisible threads, independent review gating, restart replay-state retention, no-owner yielding, cross-window no-dispatch, and legacy single-target compatibility.
+
+Native Windows acceptance must additionally demonstrate: three real Codex conversations opened as editor tabs in one window; mixed running/rejected-input states; quota reset; FIFO advancement; second quota exhaustion; manual Review; restart with outstanding items; and no duplicate IPC sends. Test with a second VS Code window opening the same workspace, and with sidebar-only conversations, to document behavior accurately.
+
+## Release blockers
+
+1. Confirm actual official Codex tab `TabInputCustom` identity and URI shape in Windows Local/Remote builds.
+2. Validate same-workspace multi-window isolation in a native VS Code extension host, including reloads.
+3. Decide whether sidebar-only sessions require a user-explicit enrollment command or a new verified official window ownership API before calling the feature generally available.
+4. Verify that all recovery commands (Status, Review, Inspect) can address the intended target without stale targeting or losing stored input.
+
+Do not change Marketplace/Release/version packaging until these checks pass.
