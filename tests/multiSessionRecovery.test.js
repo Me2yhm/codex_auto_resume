@@ -99,6 +99,7 @@ test("one window discovers all its visible quota-failed conversations without re
   const h = harness(t);
   await h.tick();
   const backlog = h.context.workspaceState.get(RECOVERY_BACKLOG_KEY);
+  assert.ok(backlog, h.logs.join("\n"));
   assert.deepEqual(backlog.map(item => item.threadId), [B, C]);
   assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, A);
   assert.ok(backlog.every(item => item.recoveryPlan));
@@ -111,6 +112,7 @@ test("same workspace conversations from other windows are never automatically qu
   t.mock.method(Date, "now", () => NOW);
   const h = harness(t, { windowTabs: [A, B] });
   await h.tick();
+  assert.ok(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY), h.logs.join("\n"));
   assert.deepEqual(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY).map(item => item.threadId), [B]);
   assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, A);
   assert.equal(h.sends.length, 0);
@@ -124,7 +126,7 @@ test("a reviewed-out active conversation yields to another ready saved conversat
       recovery(C, { recoveryPlan: plan("continue") })],
   });
   await h.tick();
-  assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, C);
+  assert.equal(h.context.workspaceState.get(ARMED_KEY).threadId, C, h.logs.join("\n"));
   const backlog = h.context.workspaceState.get(RECOVERY_BACKLOG_KEY);
   assert.deepEqual(backlog.map(item => item.threadId), [B, A]);
   assert.equal(h.sends.length, 0);
@@ -142,7 +144,7 @@ test("a backlog survives controller recreation and restores the exact input deci
   first.dispose();
   const second = harness(t, { workspaceState: state, windowTabs: [A, B] });
   await second.tick();
-  assert.equal(state.get(ARMED_KEY).threadId, B);
+  assert.equal(state.get(ARMED_KEY).threadId, B, second.logs.join("\n"));
   assert.equal(state.get(ARMED_KEY).replayAttempts, 1);
   assert.equal(state.get(RECOVERY_BACKLOG_KEY)[0].threadId, A);
 });
