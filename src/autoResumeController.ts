@@ -553,6 +553,43 @@ export class AutoResumeController implements vscode.Disposable {
     await vscode.window.showTextDocument(doc, { preview: true });
   }
 
+  /**
+   * The review target is chosen explicitly from the window's saved backlog.
+   * Never switch away from a dispatch that could already have been delivered.
+   */
+  private async selectRecoveryForReview(): Promise<boolean> {
+    const backlog = this.backlog();
+    if (!backlog.length) return true;
+    const current = this.armed();
+    if (current?.dispatchPending || current?.resumeTurnId) {
+      void vscode.window.showWarningMessage("An existing recovery dispatch is being verified; selection is blocked until its outcome is known.");
+      return false;
+    }
+    const ids = this.windowConversationIds();
+    const choices = [...(current ? [current] : []), ...backlog]
+      .filter(item => ids.has(item.threadId.toLowerCase()));
+    if (!choices.length) {
+      void vscode.window.showWarningMessage("No saved recovery conversation is open in this VS Code window.");
+      return false;
+    }
+    const selected = await vscode.window.showQuickPick(choices.map(item => ({
+      label: item.threadId,
+      description: item.recoveryPlan?.action === "needs_review" ? "Review required" : "Recovery queued",
+      threadId: item.threadId,
+    })), { placeHolder: "Select a conversation in this window to review its saved input" });
+    if (!selected) return false;
+    if (current?.threadId === selected.threadId) return true;
+    const target = backlog.find(item => item.threadId === selected.threadId);
+    if (!target) return false;
+    // Save the outgoing active record in the backlog before replacing it.
+    const nextBacklog = [...backlog.filter(item => item.threadId !== target.threadId),
+      ...(current ? [current] : [])];
+    await this.saveBacklog(nextBacklog);
+    await this.saveArmed(target);
+    this.availabilityCandidate = undefined;
+    return true;
+  }
+
   /** An explicit per-input choice queues an action; it never bypasses quota guards. */
   async reviewRecoveryInput(): Promise<void> {
     if (this.reviewingInput) return;
@@ -563,6 +600,7 @@ export class AutoResumeController implements vscode.Disposable {
     this.reviewingInput = true;
     try {
       await this.ensureClient();
+      if (!await this.selectRecoveryForReview()) return;
       const armed = this.armed();
       if (!armed) {
         void vscode.window.showWarningMessage("There is no Armed recovery target in this extension host. Inspect the current conversation or confirm the Local/Remote host.");
