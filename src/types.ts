@@ -83,6 +83,8 @@ export interface ThreadTurnsListResponse {
 }
 
 export interface ArmedResume {
+  /** Enqueued from a verified custom-editor tab in this window. Recheck before any IPC send. */
+  windowScoped?: true;
   recoveryPlan?: RecoveryPlan;
   replayAttempts?: number;
   replaySourceTurnId?: string;
