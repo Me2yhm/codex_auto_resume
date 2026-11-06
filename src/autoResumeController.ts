@@ -990,6 +990,10 @@ export class AutoResumeController implements vscode.Disposable {
   private async tryAutomaticResume(armed: ArmedResume): Promise<void> {
     const current = this.armed();
     if (!this.canMonitor() || !current || current.dispatchPending || current.resumeTurnId) return;
+    if (current.windowScoped && !this.windowConversationIds().has(current.threadId.toLowerCase())) {
+      this.output.appendLine(`[auto-resume] window-scoped thread ${current.threadId} is no longer open here; preserving recovery without IPC`);
+      return;
+    }
     if (this.inputRecoveryEnabled() && (!current.recoveryPlan || current.recoveryPlan.action === "needs_review")) return;
     const savedInput = current.recoveryPlan?.action === "replay_input" ? replayText(current.recoveryPlan) : undefined;
     if (current.recoveryPlan?.action === "replay_input" && savedInput === undefined) return;
@@ -1058,6 +1062,9 @@ export class AutoResumeController implements vscode.Disposable {
         // we are finding the official writer. Recheck immediately before IPC
         // startTurn instead of relying on the earlier dispatch snapshot.
         const currentAttempt = this.armed();
+        if (currentAttempt?.windowScoped && !this.windowConversationIds().has(armed.threadId.toLowerCase())) {
+          throw new WorkContinuationPreflightCancelled("window-scoped conversation moved or closed before delivery");
+        }
         if (!this.canMonitor() || !currentAttempt?.dispatchPending ||
             currentAttempt.threadId !== armed.threadId ||
             currentAttempt.dispatchPending.hostClaimToken !== claim.record.token ||
@@ -1509,7 +1516,7 @@ export class AutoResumeController implements vscode.Disposable {
         const reason = classifyLimitError(latest);
         if (!latest || !reason || !this.canMonitor()) continue;
         const record: ArmedResume = {
-          threadId: thread.id, cwd: thread.cwd, armedAtMs: Date.now(),
+          threadId: thread.id, cwd: thread.cwd, armedAtMs: Date.now(), windowScoped: true,
           resetAtMs: this.computeResetAt(limits) ?? 0,
           interruptedTurnId: latest.id, reason,
         };
