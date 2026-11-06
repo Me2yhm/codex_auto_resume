@@ -588,8 +588,8 @@ export class AutoResumeController implements vscode.Disposable {
     const target = backlog.find(item => item.threadId === selected.threadId);
     if (!target) return false;
     // Save the outgoing active record in the backlog before replacing it.
-    const nextBacklog = [...backlog.filter(item => item.threadId !== target.threadId),
-      ...(current ? [current] : [])];
+    const nextBacklog = [...backlog.filter(item => item.threadId !== target.threadId &&
+      item.threadId !== current?.threadId), ...(current ? [current] : [])];
     await this.saveBacklog(nextBacklog);
     await this.saveArmed(target);
     this.availabilityCandidate = undefined;
@@ -734,7 +734,8 @@ export class AutoResumeController implements vscode.Disposable {
           item.recoveryPlan?.action !== "needs_review");
         const chosen = selectNextRecovery(eligible, true);
         if (chosen) {
-          const nextBacklog = backlog.filter(item => item.threadId !== chosen.selected.threadId);
+          const nextBacklog = backlog.filter(item => item.threadId !== chosen.selected.threadId &&
+            item.threadId !== armed?.threadId);
           if (armed) nextBacklog.push(armed);
           if (armed) {
             await this.saveBacklog(nextBacklog);
@@ -757,6 +758,17 @@ export class AutoResumeController implements vscode.Disposable {
         if (armedIsPrimer) await this.saveArmed(undefined);
         if (pendingIsPrimer) await this.savePendingQuotaCandidate(undefined);
         this.output.appendLine("[auto-resume] cleared a stored Primer recovery target; dedicated Primer threads are excluded from work recovery");
+        return;
+      }
+
+      if (armed && this.backlog().length && vscode.window.tabGroups &&
+          !ids.has(armed.threadId.toLowerCase())) {
+        // The shared workspace store can be read by another VS Code window
+        // opening the same folder. Never dispatch another window's saved work.
+        // Its owner window can still progress it. We may discover this window's
+        // other custom-editor conversations into the backlog.
+        this.availabilityCandidate = undefined;
+        await this.collectWindowRecoveries(limits);
         return;
       }
 
