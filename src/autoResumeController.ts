@@ -363,7 +363,9 @@ export class AutoResumeController implements vscode.Disposable {
     const pending = this.pendingQuotaCandidate();
     const registration = !this.enabled() || this.disposed ? undefined
       : armed ? { phase: armed.resumeTurnId || armed.dispatchPending ? "verifying" as const : "armed" as const, threadId: armed.threadId }
-      : pending ? { phase: "pending" as const, threadId: pending.threadId } : undefined;
+      : pending ? { phase: "pending" as const, threadId: pending.threadId }
+      : this.backlog()[0] ? { phase: "armed" as const, threadId: this.backlog()[0].threadId }
+      : undefined;
     try {
       await this.recovery.set(registration);
       if (this.coordinationUnavailable) this.output.appendLine("[auto-resume] same-host recovery registration recovered");
@@ -690,8 +692,15 @@ export class AutoResumeController implements vscode.Disposable {
         if (chosen) {
           const nextBacklog = backlog.filter(item => item.threadId !== chosen.selected.threadId);
           if (armed) nextBacklog.push(armed);
-          await this.saveBacklog(nextBacklog);
-          await this.saveArmed(chosen.selected);
+          if (armed) {
+            await this.saveBacklog(nextBacklog);
+            await this.saveArmed(chosen.selected);
+          } else {
+            // Write the new active record before removing the durable backlog
+            // copy. A crash may leave a duplicate, but can never lose the job.
+            await this.saveArmed(chosen.selected);
+            await this.saveBacklog(nextBacklog);
+          }
           armed = chosen.selected;
         }
       }
@@ -1448,6 +1457,12 @@ export class AutoResumeController implements vscode.Disposable {
   ): Promise<{ thread: CodexThread; turn: CodexTurn; reason: ArmedResume["reason"] } | undefined> {
     const thread = await this.findMostRecentThread();
     if (!thread) return undefined;
+    // Only tabs from this exact VS Code window qualify for new automatic
+    // discovery. The older cwd-only lookup is retained for mock/legacy hosts
+    // that do not expose the tab groups API, never for real VS Code windows.
+    if (vscode.window.tabGroups && !this.windowConversationIds().has(thread.id.toLowerCase())) {
+      return undefined;
+    }
 
     const ageMinutes = (Date.now() - thread.updatedAt * 1000) / 60_000;
     const recentMinutes = Math.max(
