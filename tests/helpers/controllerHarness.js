@@ -68,6 +68,11 @@ function createVscodeMock(options = {}) {
       async showWarningMessage(message) {
         messages.push({ type: "warning", message });
       },
+      async showQuickPick(items) {
+        const selected = items[options.quickPickIndex ?? 0];
+        messages.push({ type: "quick-pick", message: selected?.label ?? "<none>" });
+        return selected;
+      },
     },
     workspace: {
       workspaceFolders: (options.workspaceFolders ?? ["/workspace"]).map((folder) => ({
