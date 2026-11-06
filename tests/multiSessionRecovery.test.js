@@ -152,5 +152,5 @@ test("a corrupt backlog fails closed and does not send any continuation", async 
   await h.tick();
   assert.equal(h.sends.length, 0);
   assert.equal(state.get(RECOVERY_BACKLOG_KEY).length, 1);
-  assert.ok(h.logs.some(line => line.includes("Invalid multi-session recovery")));
+  assert.ok(h.logs.some(line => /Invalid.*recovery record/.test(line)));
 });
