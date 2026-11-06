@@ -41,12 +41,8 @@ function failedTurn(id) {
   };
 }
 function attachWindowTabs(h, ids) {
-  h.vscode.TabInputCustom = class {
-    constructor(id) {
-      this.viewType = "chatgpt.conversationEditor";
-      this.uri = { scheme: "openai-codex", authority: "route", path: `/local/${id}` };
-    }
-  };
+  // The constructor is defined in the VS Code mock before controller import;
+  // TypeScript's CommonJS namespace wrapper captures exported properties.
   h.vscode.window.tabGroups = { all: [{ tabs: ids.map(id => ({ input: new h.vscode.TabInputCustom(id) })) }] };
 }
 function harness(t, options = {}) {
