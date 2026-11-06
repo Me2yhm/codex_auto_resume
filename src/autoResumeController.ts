@@ -144,35 +144,41 @@ export class AutoResumeController implements vscode.Disposable {
       void vscode.window.showInformationMessage("Codex Auto Resume is disabled.");
       return;
     }
+    let backlog: ArmedResume[];
+    try {
+      backlog = this.backlog();
+    } catch {
+      void vscode.window.showWarningMessage("Saved recovery backlog is invalid. Automatic recovery is blocked; inspect the Codex Auto Resume Output and preserve the workspace state.");
+      return;
+    }
+    const summary = recoveryQueueSummary(armed, backlog);
+    const suffix = summary.total > 1
+      ? ` Queue: ${summary.total} total; ${summary.ready} awaiting/ready; ${summary.requiresReview} need review; ${summary.verifying} verifying.`
+      : "";
     if (!armed) {
       const pending = this.pendingQuotaCandidate();
       if (pending) {
         void vscode.window.showInformationMessage(
-          `Codex Auto Resume is monitoring an interrupted turn ${pending.turnId} on thread ${pending.threadId}, but account quota state is temporarily unavailable. It will arm only after quota interruption is confirmed.`,
+          `Codex Auto Resume is monitoring interrupted turn ${pending.turnId} on thread ${pending.threadId}, but account quota state is temporarily unavailable. It will arm only after quota interruption is confirmed.${suffix}`,
         );
         return;
       }
-      const backlog = this.backlog();
       void vscode.window.showInformationMessage(backlog.length
-        ? `Codex Auto Resume has ${backlog.length} saved interrupted conversation(s); no active dispatch. Open the matching Codex editors in this window to allow recovery.`
+        ? `Codex Auto Resume has ${backlog.length} saved interrupted conversation(s); no active dispatch. Open the matching Codex editors in this window to allow recovery.${suffix}`
         : "Codex Auto Resume is enabled and monitoring; no interrupted thread is armed.");
       return;
-    }
-    const summary = recoveryQueueSummary(armed, this.backlog());
-    if (summary.total > 1) {
-      this.output.appendLine(`[auto-resume] single-window recovery queue: total=${summary.total} review=${summary.requiresReview} verifying=${summary.verifying} ready=${summary.ready}`);
     }
     if (armed.resumeTurnId || armed.dispatchPending) {
       const phase = armed.resumeTurnId ? "verifying a resumed turn" : "checking a pending dispatch";
       const savedAction = armed.recoveryPlan?.action ?? "not yet classified";
       void vscode.window.showInformationMessage(
-        `Codex Auto Resume is ${phase} on thread ${armed.threadId}; saved recovery action: ${savedAction}. Review cannot replace an in-flight attempt. No duplicate will be sent. Use Inspect Recovery Input for details.`,
+        `Codex Auto Resume is ${phase} on thread ${armed.threadId}; saved recovery action: ${savedAction}. Review cannot replace an in-flight attempt. No duplicate will be sent. Use Inspect Recovery Input for details.${suffix}`,
       );
       return;
     }
     if (this.inputRecoveryEnabled() && !armed.recoveryPlan) {
       void vscode.window.showInformationMessage(
-        `Codex Auto Resume is Armed for thread ${armed.threadId} and classifying the failed input. No recovery action has been chosen; it will not send until classification completes.`,
+        `Codex Auto Resume is Armed for thread ${armed.threadId} and classifying the failed input. No recovery action has been chosen; it will not send until classification completes.${suffix}`,
       );
       return;
     }
@@ -182,14 +188,14 @@ export class AutoResumeController implements vscode.Disposable {
         ? "TXT attachment safety/integrity check blocked replay. Inspect the recovery input and restore the original managed attachment; Review cannot bypass this block."
         : "Run Review Recovery Input if the saved input is eligible.";
       void vscode.window.showWarningMessage(
-        `Codex Auto Resume saved the recovery target ${armed.threadId}, but input handling needs review (${reason}). ${detail} No continuation will be sent while evidence is unresolved.`,
+        `Codex Auto Resume saved the recovery target ${armed.threadId}, but input handling needs review (${reason}). ${detail} No continuation will be sent while evidence is unresolved.${suffix}`,
       );
       return;
     }
     const reset = new Date(armed.resetAtMs).toLocaleString();
     const action = armed.recoveryPlan?.action === "replay_input" ? "replay the saved input verbatim" : "continue existing work";
     void vscode.window.showInformationMessage(
-      `Codex Auto Resume is ${this.availabilityCandidate ? "Confirming availability" : "Armed (awaiting availability)"} for thread ${armed.threadId}. Expected backend reset ${reset}; confirmed quota availability can resume earlier. Recovery action: ${action}.`,
+      `Codex Auto Resume is ${this.availabilityCandidate ? "Confirming availability" : "Armed (awaiting availability)"} for thread ${armed.threadId}. Expected backend reset ${reset}; confirmed quota availability can resume earlier. Recovery action: ${action}.${suffix}`,
     );
   }
 
