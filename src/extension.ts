@@ -16,6 +16,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("codexAutoResume.enable", () => controller.enable()),
     vscode.commands.registerCommand("codexAutoResume.disable", () => controller.disable()),
     vscode.commands.registerCommand("codexAutoResume.status", () => controller.showStatus()),
+    vscode.commands.registerCommand("codexAutoResume.diagnoseMonitoring", () => controller.diagnoseMonitoring()),
     vscode.commands.registerCommand("codexAutoResume.inspectRecoveryInput", () => controller.inspectRecoveryInput()),
     vscode.commands.registerCommand("codexAutoResume.inspectRecoveryInteractions", () => controller.inspectRecoveryInteractions()),
     vscode.commands.registerCommand("codexAutoResume.reviewRecoveryInput", () => controller.reviewRecoveryInput()),
