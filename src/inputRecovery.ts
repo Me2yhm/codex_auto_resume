@@ -296,10 +296,10 @@ export function matchesReplayedInput(turn: CodexTurn, plan: RecoveryPlan): boole
         input.messageId === plan.manualReplayInput?.messageId)
     : plan.inputs.length === 1 ? plan.inputs[0] : undefined;
   if (users.length !== 1 || !record(users[0]) || !source) return false;
-  const expected = plan.manualReplyKind === "structured_question_reply"
+  const expectedInput = plan.manualReplyKind === "structured_question_reply"
     ? [{ type: "text", text: replayText(plan), text_elements: [] }]
     : source.content;
-  if (canonical(users[0].content) !== canonical(expected)) return false;
+  if (canonical(users[0].content) !== canonical(expectedInput)) return false;
   const original = originalReplayText(plan) ?? "";
   const refs = pastedTxtReferences(original);
   if (!refs.present) return true;
