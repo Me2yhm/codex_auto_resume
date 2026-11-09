@@ -169,7 +169,7 @@ export class AutoResumeController implements vscode.Disposable {
       }
       void vscode.window.showInformationMessage(backlog.length
         ? `Codex Auto Resume has ${backlog.length} saved interrupted conversation(s); no active dispatch. Open the matching Codex editors in this window to allow recovery.${suffix}`
-        : "Codex Auto Resume is enabled and monitoring; no interrupted thread is armed.");
+        : "Codex Auto Resume is enabled and monitoring; no interrupted thread is armed. Run Diagnose Monitoring (Read-Only) to check Remote SSH thread discovery, owner evidence and quota state.");
       return;
     }
     if (armed.resumeTurnId || armed.dispatchPending) {
@@ -266,8 +266,12 @@ export class AutoResumeController implements vscode.Disposable {
           status: classified.status,
           reason: classified.reason,
           ordinaryUsageAllowed: limits.ordinaryUsageAllowed ?? null,
-          reachedType: typeof window?.rateLimitReachedType === "string"
-            ? window.rateLimitReachedType : null,
+          reachedType: [
+            "rate_limit_reached", "workspace_owner_credits_depleted",
+            "workspace_member_credits_depleted", "workspace_owner_usage_limit_reached",
+            "workspace_member_usage_limit_reached",
+          ].includes(String(window?.rateLimitReachedType))
+            ? window?.rateLimitReachedType : null,
           hasFutureResetTime: Boolean(this.computeResetAt(window)),
         };
         if (classified.status === "blocked" && !this.computeResetAt(window)) {
@@ -356,6 +360,17 @@ export class AutoResumeController implements vscode.Disposable {
       }
       if (tabs.size === 0) {
         report.interpretation.push("No window-owned Codex custom-editor tab was found. Sidebar-only sessions cannot be enrolled in the new multi-session backlog without stronger owner evidence.");
+      }
+      const sampled = report.scans.flatMap(scan =>
+        (scan as { candidates?: Array<Record<string, unknown>> }).candidates ?? []);
+      if (report.quota.status === "blocked" &&
+          sampled.length && !sampled.some(item =>
+            item.structuredQuotaError === "usageLimitExceeded" ||
+            item.structuredQuotaError === "rateLimitExceeded" ||
+            item.latestStatus === "failed" || item.latestStatus === "interrupted")) {
+        report.interpretation.push(
+          "The sampled workspace turns are not failed/interrupted even though the quota is blocked. The official UI may have rejected the new prompt before a Codex turn was persisted; no input can safely be auto-replayed solely from a visible error banner.",
+        );
       }
     }
     const doc = await vscode.workspace.openTextDocument({
