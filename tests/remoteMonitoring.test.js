@@ -153,3 +153,75 @@ test("read-only monitoring explains pre-turn quota rejection without synthesizin
   assert.equal(h.state.get(ARMED), undefined);
   assert.equal(h.sends.length, 0);
 });
+
+
+test("targeted read-only diagnostic uses exact Codex conversation and Turn ID rather than newest completed Turn", async t => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = createRemoteHarness(t);
+  const requestedTurn = "00000000-0000-4000-8000-000000000003";
+  const newestTurn = "00000000-0000-4000-8000-000000000004";
+  const entries = [TARGET, requestedTurn];
+  h.vscode.window.showInputBox = async () => entries.shift();
+  h.setRequestHandler((method, params) => {
+    if (method === "thread/turns/list") {
+      assert.equal(params.threadId, TARGET);
+      return params.cursor === "older"
+        ? { data: [{ id: requestedTurn, status: "failed",
+            error: { codexErrorInfo: "usageLimitExceeded", message: "TOP_SECRET_ERROR" } }], nextCursor: null }
+        : { data: [{ id: newestTurn, status: "completed", error: null,
+            items: [{ type: "userMessage", text: "TOP_SECRET_PROMPT" }] }], nextCursor: "older" };
+    }
+    if (method === "account/rateLimits/read") return quota();
+    throw Error("unexpected diagnostic RPC method " + method);
+  });
+  const before = h.state.updates.length;
+  await h.controller.diagnoseExactThread();
+  const report = JSON.parse(h.previews.at(-1).content);
+  assert.equal(report.host.remoteName, "ssh-remote");
+  assert.equal(report.identity.currentWindowCodexEditorTab, true);
+  assert.equal(report.identity.inspectedTurns, 2);
+  assert.equal(report.exactTurn.found, true);
+  assert.equal(report.exactTurn.status, "failed");
+  assert.equal(report.exactTurn.quotaFailureReason, "usageLimitExceeded");
+  assert.equal(report.newestTurn.status, "completed");
+  assert.equal(report.quota.workspaceCreditsDepleted, true);
+  assert.ok(report.interpretation.some(x => x.includes("structured quota failure")));
+  for (const secret of [TARGET, requestedTurn, newestTurn, "TOP_SECRET_ERROR", "TOP_SECRET_PROMPT"]) {
+    assert.equal(JSON.stringify(report).includes(secret), false);
+  }
+  assert.equal(h.state.updates.length, before);
+  assert.equal(h.sends.length, 0);
+});
+
+test("targeted diagnostic never arms a placeholder Turn that the App Server cannot find", async t => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = createRemoteHarness(t);
+  const requestedTurn = "00000000-0000-4000-8000-000000000003";
+  const entries = [TARGET, requestedTurn];
+  h.vscode.window.showInputBox = async () => entries.shift();
+  h.setRequestHandler((method, params) => {
+    if (method === "thread/turns/list") return { data: [
+      { id: "00000000-0000-4000-8000-000000000004", status: "completed", error: null },
+    ], nextCursor: null };
+    if (method === "account/rateLimits/read") return quota();
+    throw Error("unexpected diagnostic RPC method " + method);
+  });
+  await h.controller.diagnoseExactThread();
+  const report = JSON.parse(h.previews.at(-1).content);
+  assert.equal(report.exactTurn.found, false);
+  assert.equal(report.newestTurn.status, "completed");
+  assert.ok(report.interpretation.some(x => x.includes("not found")));
+  assert.equal(h.state.get(ARMED), undefined);
+  assert.equal(h.state.updates.length, 0);
+  assert.equal(h.sends.length, 0);
+});
+
+test("targeted diagnosis rejects invalid IDs before any App Server request or state change", async t => {
+  const h = createRemoteHarness(t);
+  h.vscode.window.showInputBox = async () => "../untrusted";
+  await h.controller.diagnoseExactThread();
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.previews.length, 0);
+  assert.equal(h.state.updates.length, 0);
+  assert.equal(h.sends.length, 0);
+});
