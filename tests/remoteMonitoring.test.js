@@ -33,6 +33,7 @@ function createRemoteHarness(t, { sourceFilteredHasTarget = true, visible = true
   const state = createMemoryMemento();
   const h = createControllerHarness({
     workspaceState: state,
+    remoteName: "ssh-remote",
     request(method, params) {
       if (method === "account/rateLimits/read") return quota();
       if (method === "thread/list") return { data: params.sourceKinds
@@ -46,7 +47,6 @@ function createRemoteHarness(t, { sourceFilteredHasTarget = true, visible = true
       throw new Error("unexpected " + method);
     },
   });
-  h.vscode.env = { remoteName: "ssh-remote" };
   h.vscode.extensions = { getExtension: () => undefined };
   h.vscode.window.tabGroups = { all: [{ tabs: visible ? [{
     input: Object.assign(new h.vscode.TabInputCustom(TARGET), {
