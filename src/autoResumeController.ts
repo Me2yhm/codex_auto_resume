@@ -382,6 +382,132 @@ export class AutoResumeController implements vscode.Disposable {
     await vscode.window.showTextDocument(doc, { preview: true });
   }
 
+  /**
+   * Inspect one user-identified Codex conversation and optional exact Turn.
+   * This is a read-only probe of the App Server in THIS extension host: never
+   * infer a recovery action or queue a prompt from an incoming UI placeholder.
+   */
+  async diagnoseExactThread(): Promise<void> {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const threadId = (await vscode.window.showInputBox({
+      title: "Codex Auto Resume: Inspect Exact Thread (Read-Only)",
+      prompt: "Paste the conversationId from the Codex Output log. Nothing will be submitted to Codex.",
+      placeHolder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      ignoreFocusOut: true,
+      validateInput: value => uuid.test(value.trim()) ? undefined : "Enter a complete Codex conversation UUID.",
+    }))?.trim().toLowerCase();
+    if (!threadId) return;
+    if (!uuid.test(threadId)) {
+      void vscode.window.showWarningMessage("The conversation ID is invalid. Nothing was sent.");
+      return;
+    }
+    const turnText = (await vscode.window.showInputBox({
+      title: "Codex Auto Resume: Optional Exact Turn",
+      prompt: "Paste its turnId, or leave blank to inspect only the newest Turn.",
+      placeHolder: "Optional xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      ignoreFocusOut: true,
+      validateInput: value => !value.trim() || uuid.test(value.trim())
+        ? undefined : "Enter a complete Turn UUID or leave blank.",
+    }));
+    if (turnText === undefined) return;
+    const requestedTurnId = turnText.trim().toLowerCase();
+    if (requestedTurnId && !uuid.test(requestedTurnId)) {
+      void vscode.window.showWarningMessage("The Turn ID is invalid. Nothing was sent.");
+      return;
+    }
+
+    const hash = (value: string): string => createHash("sha256").update(value).digest("hex").slice(0, 12);
+    const status = (value: unknown): string =>
+      ["completed", "failed", "interrupted", "inProgress", "pending", "notStarted"].includes(String(value))
+        ? String(value) : value === undefined ? "missing" : "other";
+    const summarizedTurn = (turn: CodexTurn | undefined): Record<string, unknown> => ({
+      found: Boolean(turn),
+      status: turn ? status(turn.status) : "missing",
+      quotaFailureReason: turn ? (classifyLimitError(turn) ?? "not_confirmed") : "not_found",
+      hasError: Boolean(turn?.error),
+    });
+    const record: {
+      note: string;
+      host: Record<string, unknown>;
+      identity: Record<string, unknown>;
+      exactTurn: Record<string, unknown>;
+      newestTurn: Record<string, unknown>;
+      quota: Record<string, unknown>;
+      interpretation: string[];
+    } = {
+      note: "READ-ONLY LOCAL DIAGNOSTIC. IDs are hashed; no prompts, answers, paths or raw errors are included. No recovery state or messages are changed.",
+      host: { remoteName: vscode.env?.remoteName ?? null, platform: process.platform },
+      identity: {
+        conversationHash: hash(threadId),
+        requestedTurnHash: requestedTurnId ? hash(requestedTurnId) : null,
+        currentWindowCodexEditorTab: this.windowConversationIds().has(threadId),
+        sameAsArmedRecovery: this.armed()?.threadId.toLowerCase() === threadId,
+        sameAsPendingQuotaCandidate: this.pendingQuotaCandidate()?.threadId.toLowerCase() === threadId,
+      },
+      exactTurn: { found: false, status: "not_checked" },
+      newestTurn: { found: false, status: "not_checked" },
+      quota: { status: "not_checked" },
+      interpretation: [],
+    };
+    try {
+      await this.ensureClient();
+      let cursor: string | null = null;
+      const seen = new Set<string>();
+      let newest: CodexTurn | undefined;
+      let requested: CodexTurn | undefined;
+      let inspected = 0;
+      for (let page = 0; page < (requestedTurnId ? 10 : 1); page++) {
+        const result: ThreadTurnsListResponse = await this.client!.request<ThreadTurnsListResponse>(
+          "thread/turns/list", { threadId, limit: 50, sortDirection: "desc", itemsView: "summary",
+            ...(cursor ? { cursor } : {}) }, 15_000,
+        );
+        if (!Array.isArray(result?.data)) {
+          record.interpretation.push("App Server returned an unsupported thread history shape.");
+          break;
+        }
+        inspected += result.data.length;
+        if (!newest) newest = result.data[0];
+        if (requestedTurnId) requested = result.data.find(item => item.id === requestedTurnId);
+        if (requested || !requestedTurnId) break;
+        const next = result.nextCursor;
+        if (!next || seen.has(next)) break;
+        cursor = next;
+        seen.add(next);
+      }
+      record.newestTurn = summarizedTurn(newest);
+      record.exactTurn = requestedTurnId ? summarizedTurn(requested) : { ...summarizedTurn(newest), sameAsNewest: true };
+      record.identity.inspectedTurns = inspected;
+      if (requestedTurnId && !requested) {
+        record.interpretation.push("The event Turn was not found in the bounded App Server history read. It may be a transient UI placeholder, unavailable in this host, or older than the scan window. This is not proof the original prompt failed.");
+      }
+      const relevant = requestedTurnId ? requested : newest;
+      if (relevant && classifyLimitError(relevant)) {
+        record.interpretation.push("The exact Codex Turn contains a structured quota failure; it is valid interruption evidence, but this diagnostic does NOT register a recovery target.");
+      } else if (relevant?.status === "completed") {
+        record.interpretation.push("This Turn is completed with no structured quota failure. A quota banner can be shown when a later prompt was rejected before a new persisted Turn existed.");
+      } else if (relevant && ["failed", "interrupted"].includes(relevant.status)) {
+        record.interpretation.push("The Turn is failed/interrupted, but no recognized structured quota error was returned. Do not infer quota as the sole cause from account status.");
+      }
+    } catch {
+      record.exactTurn = { found: false, status: "read_failed" };
+      record.interpretation.push("Exact conversation history could not be read through this extension host's App Server; verify Local/Remote host and Codex identity.");
+    }
+    try {
+      const response = await this.client!.request<RateLimitsReadResponse>(
+        "account/rateLimits/read", { excludeResetCreditDetails: true }, 15_000,
+      );
+      const classification = classifyQuotaAvailability(response);
+      record.quota = { status: classification.status, reason: classification.reason,
+        workspaceCreditsDepleted: [
+          "workspace_owner_credits_depleted", "workspace_member_credits_depleted",
+        ].includes(String(response.rateLimits?.rateLimitReachedType)) };
+    } catch {
+      record.quota = { status: "unavailable" };
+    }
+    const doc = await vscode.workspace.openTextDocument({ language: "json", content: JSON.stringify(record, null, 2) });
+    await vscode.window.showTextDocument(doc, { preview: true });
+  }
+
   async resumeNow(): Promise<void> {
     if (this.inputRecoveryEnabled() && this.armed()?.recoveryPlan?.action === "needs_review") {
       await this.reviewRecoveryInput();
