@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { classifyRecoveryHistory, replayText, recoveryDiagnostic, MAX_INPUT_BYTES,
   hasUnambiguousInputProgress, questionSignals,
-  canManuallyConfirmQuestionContinuation } = require('../dist/inputRecovery');
+  canManuallyConfirmQuestionContinuation, matchesReplayedInput } = require('../dist/inputRecovery');
 const { readRecoveryHistory } = require('../dist/recoveryHistory');
 const NOW = 1_900_000_000_000;
 const input = (text = 'Original input\nCTP requires separate authorization.') => ({ type: 'text', text, text_elements: [] });
