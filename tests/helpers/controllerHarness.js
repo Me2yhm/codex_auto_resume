@@ -50,6 +50,7 @@ function createVscodeMock(options = {}) {
   return {
     configuration,
     statusBars,
+    env: { remoteName: options.remoteName ?? undefined },
     TabInputCustom,
     messages,
     executedCommands: commands,
