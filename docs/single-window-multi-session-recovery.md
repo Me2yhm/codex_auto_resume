@@ -65,3 +65,23 @@ Because official \`thread-follower-start-turn\` accepts a regular user message r
 Review now offers **Continue using last saved question answer after quota recovery** when eligible. Otherwise, a modal explains why the multiple inputs cannot safely resume and can open read-only interaction evidence. Fingerprint checks, independent quota confirmation, host dispatch deduplication, and repeat inspection immediately before IPC delivery remain required.
 
 Simulated Linux/Windows CI can establish classifier/controller safety but **cannot prove that this exact real Codex history matches the qualifying item sequence**. The user must verify on Windows with the experimental VSIX, and may need to provide a redacted, metadata-only Inspect Recovery Interactions trace if the actual turn is structured differently.
+
+
+## 2026-11-09: Remote SSH shows Monitoring after a rejected prompt
+
+A screenshot showed the official Codex UI warning "You've hit your usage limit. Contact your workspace owner for more access" after the user submitted a prompt in Remote SSH, while Show Status repeatedly said "Monitoring; no interrupted thread is armed." This is a **discovery** or **pre-turn persistence** problem, not an availability countdown. Without a recorded quota-failed turn, never invent an Armed target or resend an unsaved prompt.
+
+Changes to candidate selection:
+- Filter thread IDs against Codex custom-editor tabs in this window *during paginated selection*, not after choosing the newest workspace thread. A newer session from the same cwd cannot conceal an older visible interrupted session.
+- Accept exact \`openai-codex://route/remote/<UUID>\` or \`/local/<UUID>\` routes for a \`chatgpt.conversationEditor\` tab. Without a tab, do not infer remote-window ownership from an unfiltered list.
+- When an **exact window tab ID** exists, permit an additional read against unfiltered thread sources on the Remote host; it is still required to match an open workspace and the exact tab ID before auto-enrollment. This is not general cross-window discovery.
+- Do not display a fabricated January 1970 reset time when the backend supplies none. A workspace credits depletion may require owner action; availability revalidation is mandatory.
+
+New command: **Codex Auto Resume: Diagnose Monitoring (Read-Only)**. It samples both \`sourceKinds=["vscode"]\` and unfiltered thread listings, verifies limited latest-turn structural statuses, and reports redacted workspace/tab match counts and the account quota classification. It does not show raw input, full thread IDs or workspace paths, and it never changes recovery state, sends a continuation, or approves input.
+
+Native acceptance:
+1. Install the test VSIX in the **same SSH extension host** where Codex executes, then reload that VS Code window.
+2. Submit a prompt while quota is blocked; run Show Status. If not Armed/Pending, run Diagnose Monitoring (Read-Only).
+3. If the report finds a quota-failed matching turn, verify it can be saved without adopting any foreign-window thread. If the newest turn is not failed/interrupted, the official UI may have rejected the message **before any App Server turn was recorded**. That case requires a separately verified native IPC capture/explicit enrollment design and is not solved by scanning more threads.
+4. Check \`ordinaryUsageAllowed\`, \`rateLimitReachedType\` and whether an actual reset time exists, without inventing reset times or sending requests while blocked.
+5. Validate exact Local vs Remote extension-host installation using the extension host indicator and a real Codex owner. The GitHub Actions mocks cannot prove remote process account/store identity.
