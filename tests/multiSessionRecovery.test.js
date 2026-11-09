@@ -254,14 +254,14 @@ test("legacy single-target recovery still arms quota-failed sidebar-only work wh
   assert.equal(h.sends.length, 0);
 });
 
-test("an open editor in this window prevents the legacy newest-thread lookup from arming another tab", async (t) => {
+test("an open editor in this window is selected even when a foreign conversation updated more recently", async (t) => {
   t.mock.method(Date, "now", () => NOW);
   const h = harness(t, {
     workspaceState: createMemoryMemento(),
     windowTabs: [B],
   });
   await h.tick();
-  assert.equal(h.context.workspaceState.get(ARMED_KEY), undefined);
-  assert.deepEqual(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY).map(x => x.threadId), [B]);
+  assert.equal(h.context.workspaceState.get(ARMED_KEY)?.threadId, B);
+  assert.equal(h.context.workspaceState.get(RECOVERY_BACKLOG_KEY), undefined);
   assert.equal(h.sends.length, 0);
 });
