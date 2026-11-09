@@ -1168,3 +1168,24 @@ test('manual final question answer is fingerprint-bound across reload and duplic
   next.advance(60000); await next.tick();
   assert.equal(next.sent.length, 1);
 });
+
+
+test('unsupported multiple native replies show an explanation and safe read-only Inspect choice', async t => {
+  const source = multiQuestionTurn();
+  source.items.splice(-2, 0, { type: 'dynamicToolCall', id: 'unrelated-permission',
+    tool: 'request_permissions', status: 'inProgress' });
+  const h = setup(t, { turns: [source], available: false });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+  assert.equal(h.state().recoveryPlan.candidate, undefined);
+  let shown = false;
+  h.choose(choices => {
+    shown = true;
+    assert.deepEqual(choices, ['Inspect question/approval evidence (read-only)']);
+    return undefined;
+  });
+  await h.controller.reviewRecoveryInput();
+  assert.equal(shown, true);
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+});
