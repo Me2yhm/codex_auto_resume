@@ -650,7 +650,10 @@ export class AutoResumeController implements vscode.Disposable {
         historical?.complete === true && plan.inputs.length === 1 && historical.turns.length >= 1 &&
         historical.turns[0].id === plan.sourceTurnId &&
         canManuallyConfirmQuestionContinuation(historical.turns[0]);
-      if (!manualQuestionContinue &&
+      const manualLateAnswer = !plan.stale && plan.reason === "multiple_unresolved_inputs" &&
+        plan.candidate === "replay_input" && Boolean(plan.manualReplayInput) &&
+        replayText(plan) !== undefined;
+      if (!manualQuestionContinue && !manualLateAnswer &&
           (plan.stale || plan.candidate !== "replay_input" || replayText(plan) === undefined)) {
         const detail = plan.reason.startsWith("attachment_")
           ? `TXT attachment is blocked by ${plan.reason}; fix or restore the original file in the same host. Review cannot waive attachment integrity checks.`
@@ -659,8 +662,13 @@ export class AutoResumeController implements vscode.Disposable {
         return;
       }
       const replay = "Replay saved input after quota recovery";
+      const replayLatest = "Replay latest saved answer only after quota recovery";
       const proceed = "Continue existing work after quota recovery";
-      const choice = manualQuestionContinue
+      const choice = manualLateAnswer
+        ? await vscode.window.showWarningMessage(
+          "The original task already performed work, but the final ordinary-text reply has no confirmed execution afterwards. After inspecting this conversation, you may replay ONLY that final reply. The original task and earlier messages will not be resent. This does not grant a permission or resolve a pending approval.",
+          { modal: true }, replayLatest)
+        : manualQuestionContinue
         ? await vscode.window.showWarningMessage(
           "History contains an ambiguous question, but this turn has executed work. Only if you personally verified that no answer or approval is still pending, choose Continue. This sends the configured continuation prompt once after quota recovery and grants NO new permissions; the original prompt and its attachments will NOT be resent.",
           { modal: true }, proceed)
@@ -668,7 +676,7 @@ export class AutoResumeController implements vscode.Disposable {
           "Full history contains one user input but cannot prove whether it started. Choose only after checking the original conversation. This queues one exact action, not additional execution permissions.",
           { modal: true }, replay, proceed,
         );
-      if (choice !== replay && choice !== proceed) return;
+      if (choice !== replay && choice !== replayLatest && choice !== proceed) return;
       const fresh = await readRecoveryHistory(this.client!, armed.threadId);
       const check = await materializePastedTxt(classifyRecoveryHistory(fresh, { nowMs: Date.now(), previous: plan,
         replaySourceTurnId: fresh.turns[0]?.id === prepared?.replayTurnId ? prepared?.replaySourceTurnId : undefined,
@@ -679,22 +687,28 @@ export class AutoResumeController implements vscode.Disposable {
         fresh.turns[0].id === plan.sourceTurnId &&
         canManuallyConfirmQuestionContinuation(fresh.turns[0]) &&
         check.reason === "unanswered_question_or_approval";
-      const revalidatedReplay = !manualQuestionContinue &&
+      const revalidatedLateAnswer = manualLateAnswer && choice === replayLatest &&
+        !check.stale && check.reason === "multiple_unresolved_inputs" &&
+        check.candidate === "replay_input" && replayText(check) !== undefined &&
+        check.manualReplayInput?.turnId === plan.manualReplayInput?.turnId &&
+        check.manualReplayInput?.messageId === plan.manualReplayInput?.messageId;
+      const revalidatedReplay = !manualQuestionContinue && !manualLateAnswer &&
         check.candidate === "replay_input" && !check.stale && replayText(check) !== undefined;
       if (!this.canMonitor() || !current || current.armedAtMs !== armed.armedAtMs ||
           current.threadId !== armed.threadId || current.dispatchPending || current.resumeTurnId ||
           !fresh.complete || check.fingerprint !== plan.fingerprint ||
-          !(revalidatedManualQuestion || revalidatedReplay) ||
+          !(revalidatedManualQuestion || revalidatedLateAnswer || revalidatedReplay) ||
           current.recoveryPlan?.fingerprint !== plan.fingerprint) {
         void vscode.window.showWarningMessage("Recovery changed while the dialog was open. The stale choice was not applied; review the latest input.");
         return;
       }
-      const action = choice === replay ? "replay_input" as const : "continue" as const;
+      const action = choice === replay || choice === replayLatest ? "replay_input" as const : "continue" as const;
       const approved: RecoveryPlan = {
         ...check, action,
         ...(manualQuestionContinue ? { candidate: "continue" as const } : {}),
         reason: manualQuestionContinue
-          ? "user_confirmed_ambiguous_question_continue" : "user_confirmed_action",
+          ? "user_confirmed_ambiguous_question_continue" : revalidatedLateAnswer
+          ? "user_confirmed_latest_answer_replay" : "user_confirmed_action",
         approval: { action, fingerprint: check.fingerprint },
       };
       await this.saveArmed({ ...current, recoveryPlan: approved, replayAttempts: 0 });
