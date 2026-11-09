@@ -135,3 +135,21 @@ test("diagnostics flag missing reset timestamp without pretending monitoring has
   assert.equal(h.state.get(ARMED), undefined);
   assert.equal(h.sends.length, 0);
 });
+
+
+test("read-only monitoring explains pre-turn quota rejection without synthesizing a recovery target", async t => {
+  t.mock.method(Date, "now", () => NOW);
+  const h = createRemoteHarness(t);
+  h.setRequestHandler((method, params) => {
+    if (method === "account/rateLimits/read") return quota();
+    if (method === "thread/list") return { data: [thread(TARGET, NOW / 1000)], nextCursor: null };
+    if (method === "thread/turns/list") return { data: [turn(params.threadId, false)], nextCursor: null };
+    throw new Error("unexpected method");
+  });
+  await h.controller.diagnoseMonitoring();
+  const report = JSON.parse(h.previews.at(-1).content);
+  assert.equal(report.quota.status, "blocked");
+  assert.ok(report.interpretation.some(x => x.includes("before a Codex turn was persisted")));
+  assert.equal(h.state.get(ARMED), undefined);
+  assert.equal(h.sends.length, 0);
+});
