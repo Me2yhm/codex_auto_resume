@@ -1068,3 +1068,103 @@ test('late-answer manual approval must be invalidated if a new permission arrive
   assert.equal(h.state().recoveryPlan.action, 'needs_review');
   assert.equal(h.sent.length, 0);
 });
+
+
+function structuredQuestionReply(messageId, callId, question, answer) {
+  const tag = 'send_user_message_question_reply';
+  return user(messageId, '<' + tag + '>\n' + JSON.stringify([
+    { questionItemId: JSON.stringify(['request_user_input_async', callId, 0]), question, answer },
+  ]) + '\n</' + tag + '>\n');
+}
+
+function multiQuestionTurn() {
+  const t = turn('multi-question');
+  t.items.push(
+    { type: 'fileChange', status: 'completed', id: 'already-edited', changes: [{ path: 'already-edited' }] },
+    { type: 'agentMessage', text: 'Please append the log line.', questions: [{ id: 'Q1' }] },
+    { type: 'dynamicToolCall', id: 'call_first', tool: 'request_user_input_async', status: 'completed' },
+    structuredQuestionReply('first-reply', 'call_first', 'Append diagnostic log to file?', 'Done'),
+    { type: 'agentMessage', text: 'Log confirmed. Starting the next check.' },
+    { type: 'commandExecution', status: 'completed', id: 'recorded-work' },
+    { type: 'agentMessage', text: 'Confirm historic range?', questions: [{ id: 'Q2' }] },
+    { type: 'dynamicToolCall', id: 'call_last', tool: 'request_user_input_async', status: 'inProgress' },
+    structuredQuestionReply('last-reply', 'call_last',
+      'Do you authorize the read-only query over the historical range?', '批准上述历史查询范围'),
+    { type: 'sleep', durationMs: 500 },
+  );
+  return t;
+}
+
+test('Review shows human-only Continue for the third native question reply, and dispatches no raw envelope', async t => {
+  const source = multiQuestionTurn();
+  const h = setup(t, { turns: [source], available: false, policy: 'replayStableUserOnly' });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.reason, 'multiple_unresolved_inputs');
+  assert.equal(h.state().recoveryPlan.inputs.length, 3);
+  assert.equal(h.state().recoveryPlan.manualReplyKind, 'structured_question_reply');
+  let dialogShown = false;
+  h.choose((choices) => {
+    dialogShown = true;
+    assert.deepEqual(choices, ['Continue using last saved question answer after quota recovery']);
+    return choices[0];
+  });
+  await h.controller.reviewRecoveryInput();
+  assert.equal(dialogShown, true);
+  const saved = h.state().recoveryPlan;
+  assert.equal(saved.action, 'replay_input');
+  assert.equal(saved.reason, 'user_confirmed_last_structured_answer_continue');
+  assert.deepEqual(saved.manualReplayInput, { turnId: source.id, messageId: 'last-reply' });
+  assert.equal(h.sent.length, 0);
+
+  h.setQuota(quota(true));
+  h.advance(); await h.tick();
+  assert.equal(h.sent.length, 0);
+  h.advance(); await h.tick();
+  assert.equal(h.sent.length, 1);
+  const { prompt, threadId, overrides } = h.sent[0];
+  assert.equal(threadId, THREAD);
+  assert.match(prompt, /批准上述历史查询范围/);
+  assert.match(prompt, /Do you authorize the read-only query/);
+  assert.equal(prompt.includes('<send_user_message_question_reply>'), false);
+  assert.equal(prompt.includes('Append diagnostic log to file'), false);
+  assert.equal(prompt.includes('Full original prompt'), false);
+  assert.deepEqual(overrides, {});
+  h.advance(60000); await h.tick();
+  assert.equal(h.sent.length, 1);
+});
+
+test('Review does not approve a third native answer if a new permission appears while the modal is open', async t => {
+  const source = multiQuestionTurn();
+  const h = setup(t, { turns: [source], available: false });
+  await h.tick();
+  h.choose(choices => {
+    assert.deepEqual(choices, ['Continue using last saved question answer after quota recovery']);
+    source.items.splice(-2, 0,
+      { type: 'dynamicToolCall', tool: 'request_approval', status: 'inProgress', id: 'new-approval' });
+    return choices[0];
+  });
+  await h.controller.reviewRecoveryInput();
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+});
+
+test('manual final question answer is fingerprint-bound across reload and duplicate sends remain fenced', async t => {
+  const source = multiQuestionTurn();
+  const h = setup(t, { turns: [source], available: false });
+  await h.tick();
+  h.choose(choices => choices[0]);
+  await h.controller.reviewRecoveryInput();
+  const approved = JSON.parse(JSON.stringify(h.state()));
+  h.dispose();
+  const next = setup(t, { turns: [source], available: false, armed: approved });
+  await next.tick();
+  assert.equal(next.state().recoveryPlan.action, 'replay_input');
+  assert.equal(next.state().recoveryPlan.manualReplyKind, 'structured_question_reply');
+  assert.equal(next.sent.length, 0);
+  next.setQuota(quota(true));
+  next.advance(); await next.tick();
+  next.advance(); await next.tick();
+  assert.equal(next.sent.length, 1);
+  next.advance(60000); await next.tick();
+  assert.equal(next.sent.length, 1);
+});
