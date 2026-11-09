@@ -1542,13 +1542,19 @@ export class AutoResumeController implements vscode.Disposable {
     const primerIds = [...(journal?.knownPrimerThreadIds ?? []), ...(journal?.threadId ? [journal.threadId] : [])];
     const recentCutoff = Date.now() - Math.max(5,
       vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 480)) * 60_000;
-    let cursor: string | null = null;
-    const seen = new Set<string>();
-    for (let page = 0; page < 20; page++) {
-      const response: ThreadListResponse = await this.client!.request<ThreadListResponse>("thread/list", {
-        limit: 100, sortKey: "updated_at", sortDirection: "desc",
-        sourceKinds: ["vscode"], archived: false, ...(cursor ? { cursor } : {}),
-      });
+    // Only when a current-window editor gives exact ID evidence may we
+    // widen the source filter. Some Remote SSH Codex clients do not report
+    // their conversations as sourceKinds=["vscode"].
+    for (const filterSource of [true, false]) {
+      if ([...windowIds].every(id => queued.has(id))) break;
+      let cursor: string | null = null;
+      const seen = new Set<string>();
+      for (let page = 0; page < 20; page++) {
+        const response: ThreadListResponse = await this.client!.request<ThreadListResponse>("thread/list", {
+          limit: 100, sortKey: "updated_at", sortDirection: "desc",
+          ...(filterSource ? { sourceKinds: ["vscode"] } : {}),
+          archived: false, ...(cursor ? { cursor } : {}),
+        });
       if (!Array.isArray(response?.data)) return;
       for (const thread of response.data) {
         if (!thread || !windowIds.has(thread.id.toLowerCase()) ||
@@ -1581,9 +1587,10 @@ export class AutoResumeController implements vscode.Disposable {
         }
       }
       const nextCursor: string | null = response.nextCursor;
-      if (!nextCursor || seen.has(nextCursor)) break;
-      cursor = nextCursor;
-      seen.add(nextCursor);
+        if (!nextCursor || seen.has(nextCursor)) break;
+        cursor = nextCursor;
+        seen.add(nextCursor);
+      }
     }
   }
 
