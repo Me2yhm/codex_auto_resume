@@ -1,6 +1,9 @@
 import { createHash } from "crypto";
 import type { CodexTurn } from "./types";
-import { answeredQuestionFollowedByWork } from "./answeredQuestionRecovery";
+import {
+  answeredQuestionFollowedByWork, finalStructuredAnswerAwaitingWork,
+  structuredReplyContinuationText,
+} from "./answeredQuestionRecovery";
 
 export type RecoveryAction = "continue" | "replay_input" | "needs_review";
 export type UserOnlyPolicy = "review" | "replayStableUserOnly";
@@ -71,6 +74,8 @@ export interface RecoveryPlan {
   inputs: SavedRecoveryInput[]; // oldest first, never silently retain only the last
   /** Exact final ordinary text input permitted for human-approved replay only. */
   manualReplayInput?: { turnId: string; messageId: string };
+  /** A structured question reply must be converted into an explicit user-reviewed continuation. */
+  manualReplyKind?: "structured_question_reply";
   evidence: RecoveryEvidence[];
   stableSinceMs: number;
   observedAtMs: number;
@@ -246,9 +251,15 @@ function verifiedPastedTxtSnapshots(
 
 /** The request body remains the exact original serialized input. TXT is sent
  * separately as official UI context.attachments, never appended to the body. */
-export function replayText(plan: Pick<RecoveryPlan, "inputs" | "pastedTxtSnapshots" | "attachmentIntegrity">): string | undefined {
+export function replayText(plan: Pick<RecoveryPlan, "inputs" | "manualReplayInput" |
+    "manualReplyKind" | "pastedTxtSnapshots" | "attachmentIntegrity">): string | undefined {
   const original = originalReplayText(plan);
   if (original === undefined) return undefined;
+  if (plan.manualReplyKind === "structured_question_reply") {
+    if (!plan.manualReplayInput) return undefined;
+    return structuredReplyContinuationText({ type: "userMessage",
+      content: [{ type: "text", text: original, text_elements: [] }] });
+  }
   const refs = pastedTxtReferences(original);
   if (!refs.present) return original;
   return verifiedPastedTxtSnapshots(plan, original, refs) ? original : undefined;
@@ -285,8 +296,10 @@ export function matchesReplayedInput(turn: CodexTurn, plan: RecoveryPlan): boole
         input.messageId === plan.manualReplayInput?.messageId)
     : plan.inputs.length === 1 ? plan.inputs[0] : undefined;
   if (users.length !== 1 || !record(users[0]) || !source) return false;
-  const originalMatch = canonical(users[0].content) === canonical(source.content);
-  if (!originalMatch) return false;
+  const expected = plan.manualReplyKind === "structured_question_reply"
+    ? [{ type: "text", text: replayText(plan), text_elements: [] }]
+    : source.content;
+  if (canonical(users[0].content) !== canonical(expected)) return false;
   const original = originalReplayText(plan) ?? "";
   const refs = pastedTxtReferences(original);
   if (!refs.present) return true;
@@ -540,6 +553,38 @@ export function classifyRecoveryHistory(
       reason: "answered_question_followed_by_execution" };
   }
   if (plan.inputs.length !== 1) {
+    // A quota failure can occur after TWO OR MORE native question replies.
+    // The last reply was already submitted by the user, but no subsequent
+    // Codex work is recorded. Never replay a native serializer envelope as
+    // ordinary text or re-send earlier acknowledged answers.
+    const finalStructuredId = pending.length === 1
+      ? finalStructuredAnswerAwaitingWork(latest) : undefined;
+    const finalStructured = finalStructuredId
+      ? plan.inputs.find(input => input.turnId === latest.id && input.messageId === finalStructuredId)
+      : undefined;
+    if (finalStructured) {
+      const finalIndex = items.findIndex(item =>
+        record(item) && item.type === "userMessage" && item.id === finalStructuredId);
+      const priorWork = items.slice(1, finalIndex).some(item => itemHasProgress(item) &&
+        !(record(item) && item.type === "agentMessage" &&
+          Array.isArray(item.questions) && item.questions.length > 0));
+      if (priorWork) {
+        const manual = { ...plan, manualReplyKind: "structured_question_reply" as const,
+          manualReplayInput: { turnId: finalStructured.turnId, messageId: finalStructured.messageId },
+          candidate: "replay_input" as const, reason: "multiple_unresolved_inputs" };
+        if (replayText(manual) !== undefined) {
+          if (unchanged && previous?.approval?.action === "replay_input" &&
+              previous.approval.fingerprint === fingerprint &&
+              previous.manualReplyKind === "structured_question_reply" &&
+              previous.manualReplayInput?.turnId === finalStructured.turnId &&
+              previous.manualReplayInput?.messageId === finalStructured.messageId) {
+            return { ...manual, action: "replay_input",
+              reason: "user_confirmed_last_structured_answer_continue", approval: previous.approval };
+          }
+          return manual;
+        }
+      }
+    }
     const lastMessageId = pending.length === 1 ? latestManualAnswerCandidate(latest) : undefined;
     const selected = lastMessageId
       ? plan.inputs.find(input => input.turnId === latest.id && input.messageId === lastMessageId)
@@ -597,6 +642,7 @@ export function recoveryDiagnostic(plan: RecoveryPlan): Record<string, unknown> 
   return { schemaVersion: 1, action: plan.action, candidate: plan.candidate ?? null,
     reason: plan.reason, sourceTurnId: plan.sourceTurnId, fingerprint: plan.fingerprint,
     manualReplayInput: plan.manualReplayInput ?? null,
+    manualReplyKind: plan.manualReplyKind ?? null,
     observedAtMs: plan.observedAtMs, stableSinceMs: plan.stableSinceMs, stale: Boolean(plan.stale),
     replayableText: replayText(plan) !== undefined, evidence: plan.evidence,
     attachmentSha256: plan.pastedTxtSnapshots?.map(snapshot => snapshot.sha256) ?? [],
