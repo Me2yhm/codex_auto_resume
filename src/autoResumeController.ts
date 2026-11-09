@@ -1726,11 +1726,18 @@ export class AutoResumeController implements vscode.Disposable {
       let cursor: string | null = null;
       const seen = new Set<string>();
       for (let page = 0; page < 20; page++) {
-        const response: ThreadListResponse = await this.client!.request<ThreadListResponse>("thread/list", {
-          limit: 100, sortKey: "updated_at", sortDirection: "desc",
-          ...(filterSource ? { sourceKinds: ["vscode"] } : {}),
-          archived: false, ...(cursor ? { cursor } : {}),
-        });
+        let response: ThreadListResponse;
+        try {
+          response = await this.client!.request<ThreadListResponse>("thread/list", {
+            limit: 100, sortKey: "updated_at", sortDirection: "desc",
+            ...(filterSource ? { sourceKinds: ["vscode"] } : {}),
+            archived: false, ...(cursor ? { cursor } : {}),
+          });
+        } catch (error) {
+          if (!filterSource) throw error;
+          this.output.appendLine("[auto-resume] scoped thread listing unavailable; checking exact current-window tab IDs through an unfiltered source listing");
+          break;
+        }
       if (!Array.isArray(response?.data)) return;
       for (const thread of response.data) {
         if (!thread || !windowIds.has(thread.id.toLowerCase()) ||
@@ -1899,12 +1906,19 @@ export class AutoResumeController implements vscode.Disposable {
       const seen = new Set<string>();
       // Bound work even if an old server returns a nonterminating cursor chain.
       for (let page = 0; page < 20; page += 1) {
-        const response: ThreadListResponse = await this.client!.request<ThreadListResponse>("thread/list", {
-          limit: exact ? 20 : 100, sortKey: "updated_at", sortDirection: "desc",
-          ...(filterSource ? { sourceKinds: ["vscode"] } : {}),
-          ...(exact ? { cwd: folders } : {}), archived: false,
-          ...(cursor ? { cursor } : {}),
-        });
+        let response: ThreadListResponse;
+        try {
+          response = await this.client!.request<ThreadListResponse>("thread/list", {
+            limit: exact ? 20 : 100, sortKey: "updated_at", sortDirection: "desc",
+            ...(filterSource ? { sourceKinds: ["vscode"] } : {}),
+            ...(exact ? { cwd: folders } : {}), archived: false,
+            ...(cursor ? { cursor } : {}),
+          });
+        } catch (error) {
+          if (!filterSource || visibleIds.size === 0) throw error;
+          this.output.appendLine("[auto-resume] scoped thread listing failed; falling back only for verified current-window tab IDs");
+          break;
+        }
         if (!Array.isArray(response?.data)) return undefined;
         for (const thread of response.data) {
           if (!thread || typeof thread.id !== "string" || typeof thread.cwd !== "string" ||
