@@ -1,4 +1,5 @@
 import * as path from "path";
+import { createHash } from "crypto";
 import * as vscode from "vscode";
 import {
   classifyRecoveryHistory, hasUnambiguousInputProgress, isQuotaFailure, recoveryDiagnostic,
@@ -201,6 +202,163 @@ export class AutoResumeController implements vscode.Disposable {
     void vscode.window.showInformationMessage(
       `Codex Auto Resume is ${this.availabilityCandidate ? "Confirming availability" : "Armed (awaiting availability)"} for thread ${armed.threadId}. Expected backend reset ${reset}; confirmed quota availability can resume earlier. Recovery action: ${action}.${suffix}`,
     );
+  }
+
+  /**
+   * Passive, metadata-only diagnosis of why a quota-failed conversation was
+   * not Armed. Never changes persisted recovery state or sends a message.
+   * No raw prompt, question, cwd, credential, log text or full thread ID is
+   * included in the user-visible report.
+   */
+  async diagnoseMonitoring(): Promise<void> {
+    const tabs = this.windowConversationIds();
+    const folders = vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) ?? [];
+    const hashId = (id: string): string => createHash("sha256").update(id).digest("hex").slice(0, 12);
+    const report: {
+      note: string;
+      extension: Record<string, unknown>;
+      recoveryState: Record<string, unknown>;
+      quota: Record<string, unknown>;
+      scans: Record<string, unknown>[];
+      interpretation: string[];
+    } = {
+      note: "READ-ONLY METADATA. Does not include user text, full thread IDs or absolute paths. No recovered input is sent or approved.",
+      extension: {
+        extensionHostPlatform: process.platform,
+        remoteName: vscode.env?.remoteName ?? null,
+        officialCodexAvailableInThisHost: Boolean(vscode.extensions?.getExtension("openai.chatgpt")),
+        workspacesCount: folders.length,
+        windowCodexEditorTabs: tabs.size,
+        extensionVersion: this.context.extension?.packageJSON?.version ?? "unknown",
+        enabled: this.enabled(),
+      },
+      recoveryState: {
+        armed: Boolean(this.armed()),
+        pendingQuotaCandidate: Boolean(this.pendingQuotaCandidate()),
+        backlogCount: 0,
+      },
+      quota: { status: "not_checked" },
+      scans: [],
+      interpretation: [],
+    };
+    try {
+      report.recoveryState.backlogCount = this.backlog().length;
+    } catch {
+      report.recoveryState.backlog = "invalid_saved_state";
+    }
+    try {
+      await this.ensureClient();
+    } catch {
+      report.quota = { status: "client_unavailable" };
+      report.interpretation.push("The monitoring App Server could not be started on this extension host.");
+    }
+    if (this.client?.isRunning) {
+      try {
+        const limits = await this.client.request<RateLimitsReadResponse>(
+          "account/rateLimits/read", { excludeResetCreditDetails: true }, 15_000,
+        );
+        const classified = classifyQuotaAvailability(limits);
+        const window = limits.rateLimits;
+        report.quota = {
+          status: classified.status,
+          reason: classified.reason,
+          ordinaryUsageAllowed: limits.ordinaryUsageAllowed ?? null,
+          reachedType: typeof window?.rateLimitReachedType === "string"
+            ? window.rateLimitReachedType : null,
+          hasFutureResetTime: Boolean(this.computeResetAt(window)),
+        };
+        if (classified.status === "blocked" && !this.computeResetAt(window)) {
+          report.interpretation.push("Account usage is blocked without a future reset timestamp; a detected interrupted turn should remain saved as Pending, not be silently discarded.");
+        }
+      } catch {
+        report.quota = { status: "unavailable", reason: "rate_limit_read_failed" };
+      }
+      const modes = [
+        { label: "vscode_source", restrictSource: true },
+        { label: "all_sources_diagnostic_only", restrictSource: false },
+      ];
+      for (const mode of modes) {
+        const scan: {
+          kind: string;
+          returned: number;
+          workspaceMatches: number;
+          visibleTabMatches: number;
+          candidates: Record<string, unknown>[];
+          error?: string;
+        } = {
+          kind: mode.label, returned: 0, workspaceMatches: 0,
+          visibleTabMatches: 0, candidates: [],
+        };
+        try {
+          const seen = new Set<string>();
+          let cursor: string | null = null;
+          for (let page = 0; page < 3; page++) {
+            const response: ThreadListResponse = await this.client.request<ThreadListResponse>("thread/list", {
+              limit: 100, sortKey: "updated_at", sortDirection: "desc", archived: false,
+              ...(mode.restrictSource ? { sourceKinds: ["vscode"] } : {}),
+              ...(cursor ? { cursor } : {}),
+            }, 15_000);
+            if (!Array.isArray(response.data)) {
+              scan.error = "invalid_thread_list_response";
+              break;
+            }
+            scan.returned += response.data.length;
+            for (const thread of response.data) {
+              if (!thread || typeof thread.id !== "string" ||
+                  typeof thread.cwd !== "string" || !Number.isFinite(thread.updatedAt)) continue;
+              const workspaceMatch = isThreadCwdInsideWorkspace(thread.cwd, folders);
+              const windowVisible = tabs.has(thread.id.toLowerCase());
+              if (workspaceMatch) scan.workspaceMatches++;
+              if (windowVisible) scan.visibleTabMatches++;
+              if (!workspaceMatch && !windowVisible) continue;
+              if (scan.candidates.length >= 20) continue;
+              let latestStatus = "not_read";
+              let errorCode = "not_read";
+              try {
+                const turn = await this.latestTurn(thread.id);
+                latestStatus = typeof turn?.status === "string" ? turn.status : "missing";
+                errorCode = classifyLimitError(turn) ??
+                  (typeof turn?.error?.codexErrorInfo === "string"
+                    ? "other_structured_error" : turn?.error ? "other_error" : "none");
+              } catch {
+                latestStatus = "read_failed";
+                errorCode = "read_failed";
+              }
+              scan.candidates.push({
+                threadHash: hashId(thread.id),
+                workspaceMatch,
+                currentWindowEditorTab: windowVisible,
+                ageMinutes: Math.max(0, Math.round((Date.now() - thread.updatedAt * 1000) / 60_000)),
+                latestStatus,
+                structuredQuotaError: errorCode,
+              });
+            }
+            const next = response.nextCursor;
+            if (!next || seen.has(next)) break;
+            seen.add(next);
+            cursor = next;
+          }
+        } catch {
+          scan.error = "thread_list_read_failed";
+        }
+        report.scans.push(scan);
+      }
+      const scoped = report.scans[0] as { workspaceMatches?: number };
+      const broad = report.scans[1] as { workspaceMatches?: number };
+      if (scoped.workspaceMatches === 0 && (broad.workspaceMatches ?? 0) > 0) {
+        report.interpretation.push("Recent threads are visible without the vscode source filter but not with it. Confirm exact window ownership before any recovery dispatch.");
+      }
+      if (report.scans.every(scan => (scan as { workspaceMatches?: number }).workspaceMatches === 0)) {
+        report.interpretation.push("No recent App Server conversation matched an open workspace. Check Local/Remote extension hosts, session cwd and the Codex executable/account.");
+      }
+      if (tabs.size === 0) {
+        report.interpretation.push("No window-owned Codex custom-editor tab was found. Sidebar-only sessions cannot be enrolled in the new multi-session backlog without stronger owner evidence.");
+      }
+    }
+    const doc = await vscode.workspace.openTextDocument({
+      language: "json", content: JSON.stringify(report, null, 2),
+    });
+    await vscode.window.showTextDocument(doc, { preview: true });
   }
 
   async resumeNow(): Promise<void> {
