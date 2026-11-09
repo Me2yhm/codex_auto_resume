@@ -345,7 +345,7 @@ export class AutoResumeController implements vscode.Disposable {
         if (!(input instanceof vscode.TabInputCustom)) continue;
         if (input.viewType !== "chatgpt.conversationEditor" ||
             input.uri.scheme !== "openai-codex" || input.uri.authority !== "route") continue;
-        const match = /^\/local\/([0-9a-f-]{36})$/i.exec(input.uri.path);
+        const match = /^\/(?:local|remote)\/([0-9a-f-]{36})$/i.exec(input.uri.path);
         if (match) ids.add(match[1].toLowerCase());
       }
     }
@@ -1700,30 +1700,42 @@ export class AutoResumeController implements vscode.Disposable {
       ...(journal?.pending ? [journal.pending.threadId] : [])];
     const recentMinutes = Math.max(5, vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 480));
     const recentCutoffMs = Date.now() - recentMinutes * 60_000;
+    // A thread discovered by cwd alone is NOT evidence that this window owns
+    // it. If the window exposes Codex editor tabs, filter DURING pagination,
+    // not after selecting the newest workspace thread. Otherwise an unrelated
+    // more-recent conversation can indefinitely conceal an interrupted one.
+    const visibleIds = this.windowConversationIds();
+    const modes = [
+      { exact: true, filterSource: true },
+      { exact: false, filterSource: true },
+      ...(visibleIds.size ? [{ exact: false, filterSource: false }] : []),
+    ];
     let staleExact: CodexThread | undefined;
-    for (const exact of [true, false]) {
+    for (const { exact, filterSource } of modes) {
       let cursor: string | null = null;
       const seen = new Set<string>();
       // Bound work even if an old server returns a nonterminating cursor chain.
       for (let page = 0; page < 20; page += 1) {
         const response: ThreadListResponse = await this.client!.request<ThreadListResponse>("thread/list", {
           limit: exact ? 20 : 100, sortKey: "updated_at", sortDirection: "desc",
-          sourceKinds: ["vscode"], ...(exact ? { cwd: folders } : {}), archived: false,
+          ...(filterSource ? { sourceKinds: ["vscode"] } : {}),
+          ...(exact ? { cwd: folders } : {}), archived: false,
           ...(cursor ? { cursor } : {}),
         });
         if (!Array.isArray(response?.data)) return undefined;
         for (const thread of response.data) {
           if (!thread || typeof thread.id !== "string" || typeof thread.cwd !== "string" ||
               !Number.isFinite(thread.updatedAt) || isPrimerThread(thread, primerState, hostIds) ||
-              !isThreadCwdInsideWorkspace(thread.cwd, folders)) continue;
+              !isThreadCwdInsideWorkspace(thread.cwd, folders) ||
+              (visibleIds.size > 0 && !visibleIds.has(thread.id.toLowerCase()))) continue;
           if (thread.updatedAt * 1000 < recentCutoffMs) {
             if (exact && !staleExact) staleExact = thread;
             continue;
           }
           if (!exact) {
-            const key = `workspace-fallback:${thread.id}:${thread.cwd}`;
+            const key = `workspace-fallback:${thread.id}:${thread.cwd}:${filterSource}`;
             if (key !== this.lastThreadSelectionDiagnostic) {
-              this.output.appendLine(`[auto-resume] selected recent workspace-descendant thread ${thread.id} after exact lookup`);
+              this.output.appendLine(`[auto-resume] selected recent ${filterSource ? "workspace-descendant" : "window-visible remote-source"} thread ${thread.id} after scoped lookup`);
               this.lastThreadSelectionDiagnostic = key;
             }
           } else this.lastThreadSelectionDiagnostic = undefined;
