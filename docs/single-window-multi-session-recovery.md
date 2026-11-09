@@ -42,3 +42,13 @@ Native Windows acceptance must additionally demonstrate: three real Codex conver
 4. Verify that all recovery commands (Status, Review, Inspect) can address the intended target without stale targeting or losing stored input.
 
 Do not change Marketplace/Release/version packaging until these checks pass.
+
+## Legacy v0.3.11 late answer after a quota-blocked question
+
+A separately discovered recovery deadlock occurs when Codex has already edited files, poses a question, and the user's delayed answer is rejected by the account quota: the failed turn may contain two user messages, so the old classifier returns `multiple_unresolved_inputs`. The old Review command only accepts one replayable input and offers no selectable action.
+
+The repair deliberately preserves the original instruction and all prior recorded work. **Only** the final ordinary-text answer can become a human-only replay candidate, and only if an individual quota-failed turn contains (a) exactly two user messages, (b) independently recorded pre-answer work, (c) a preceding agent question, (d) no unknown item types, pending question/permission RPC, explicit pending question, or post-answer activity other than neutral waiting metadata. A structured question-response envelope or unrelated third instruction is not converted to ordinary text. No automatic policy enables this replay.
+
+The Review UI shows the single action **Replay latest saved answer only after quota recovery**, with a modal warning and exact locally previewed input; it does not offer generic Continue for this case. The action is bound to the full history fingerprint and exact message identity. A later history change removes the approval. All existing dispatch claims, quota rechecks, attachment security checks and verification remain mandatory.
+
+This is a narrow repair, **not** permission to bypass `multiple_unresolved_inputs` generally. If the real Codex history represents a still-pending question tool or a different structure, the recovery correctly remains blocked. Inspect Recovery Input and Inspect Recovery Interactions (Read-Only) can provide the redacted structural evidence needed to design another safe variant without weakening the security rules.
