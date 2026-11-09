@@ -52,3 +52,16 @@ The repair deliberately preserves the original instruction and all prior recorde
 The Review UI shows the single action **Replay latest saved answer only after quota recovery**, with a modal warning and exact locally previewed input; it does not offer generic Continue for this case. The action is bound to the full history fingerprint and exact message identity. A later history change removes the approval. All existing dispatch claims, quota rechecks, attachment security checks and verification remain mandatory.
 
 This is a narrow repair, **not** permission to bypass `multiple_unresolved_inputs` generally. If the real Codex history represents a still-pending question tool or a different structure, the recovery correctly remains blocked. Inspect Recovery Input and Inspect Recovery Interactions (Read-Only) can provide the redacted structural evidence needed to design another safe variant without weakening the security rules.
+
+
+## 2026-11-09: three user messages / two native structured question replies
+
+A real user preview showed a single quota-failed turn with **three** \`userMessage\` entries: an original request, a previously answered \`request_user_input_async\`, and a second structured answer submitted just as the account quota was exhausted. The initial late-answer patch only handled two messages and rejected native reply envelopes, so its Review command still produced no actionable choice.
+
+The repair now recognizes multiple native replies when all earlier replies are followed by agent activity, the last answer is validated as an official structured question-reply envelope, recorded work precedes the last reply, and **no work or acknowledgement after the last reply** is present. Unknown items, unmatched pending question tools, explicit pending permissions, malformed envelopes, unrelated user steering, additional unanswered questions, or changed history remain blocked.
+
+Because official \`thread-follower-start-turn\` accepts a regular user message rather than the original \`request_user_input_async\` RPC completion, **do not send the raw native \`<send_user_message_question_reply>\` serializer as plain chat text**. Instead, explicit per-source human approval queues a new ordinary-text continuation that quotes only the final recorded question and answer, with an instruction to inspect existing work and not expand authorization. The earlier inputs, prior code changes, and complete saved evidence remain untouched. This is an **opt-in manual decision**, never enabled by \`replayStableUserOnly\`.
+
+Review now offers **Continue using last saved question answer after quota recovery** when eligible. Otherwise, a modal explains why the multiple inputs cannot safely resume and can open read-only interaction evidence. Fingerprint checks, independent quota confirmation, host dispatch deduplication, and repeat inspection immediately before IPC delivery remain required.
+
+Simulated Linux/Windows CI can establish classifier/controller safety but **cannot prove that this exact real Codex history matches the qualifying item sequence**. The user must verify on Windows with the experimental VSIX, and may need to provide a redacted, metadata-only Inspect Recovery Interactions trace if the actual turn is structured differently.
