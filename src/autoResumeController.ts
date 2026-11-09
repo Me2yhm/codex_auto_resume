@@ -193,7 +193,11 @@ export class AutoResumeController implements vscode.Disposable {
       return;
     }
     const reset = new Date(armed.resetAtMs).toLocaleString();
-    const action = armed.recoveryPlan?.action === "replay_input" ? "replay the saved input verbatim" : "continue existing work";
+    const action = armed.recoveryPlan?.action === "replay_input"
+      ? armed.recoveryPlan.manualReplyKind === "structured_question_reply"
+        ? "continue from the last saved structured question answer"
+        : "replay the saved input verbatim"
+      : "continue existing work";
     void vscode.window.showInformationMessage(
       `Codex Auto Resume is ${this.availabilityCandidate ? "Confirming availability" : "Armed (awaiting availability)"} for thread ${armed.threadId}. Expected backend reset ${reset}; confirmed quota availability can resume earlier. Recovery action: ${action}.${suffix}`,
     );
@@ -652,8 +656,11 @@ export class AutoResumeController implements vscode.Disposable {
         canManuallyConfirmQuestionContinuation(historical.turns[0]);
       const manualLateAnswer = !plan.stale && plan.reason === "multiple_unresolved_inputs" &&
         plan.candidate === "replay_input" && Boolean(plan.manualReplayInput) &&
-        replayText(plan) !== undefined;
-      if (!manualQuestionContinue && !manualLateAnswer &&
+        !plan.manualReplyKind && replayText(plan) !== undefined;
+      const manualStructuredAnswer = !plan.stale && plan.reason === "multiple_unresolved_inputs" &&
+        plan.candidate === "replay_input" && plan.manualReplyKind === "structured_question_reply" &&
+        Boolean(plan.manualReplayInput) && replayText(plan) !== undefined;
+      if (!manualQuestionContinue && !manualLateAnswer && !manualStructuredAnswer &&
           (plan.stale || plan.candidate !== "replay_input" || replayText(plan) === undefined)) {
         const detail = plan.reason.startsWith("attachment_")
           ? `TXT attachment is blocked by ${plan.reason}; fix or restore the original file in the same host. Review cannot waive attachment integrity checks.`
@@ -663,8 +670,13 @@ export class AutoResumeController implements vscode.Disposable {
       }
       const replay = "Replay saved input after quota recovery";
       const replayLatest = "Replay latest saved answer only after quota recovery";
+      const continueFromStructured = "Continue using last saved question answer after quota recovery";
       const proceed = "Continue existing work after quota recovery";
-      const choice = manualLateAnswer
+      const choice = manualStructuredAnswer
+        ? await vscode.window.showWarningMessage(
+          "The quota-failed turn contains several native question replies. Prior work exists, but the final answer has no recorded Codex acknowledgement. The official UI IPC cannot resend a native question-reply envelope as such. After reviewing the saved inputs and confirming the last answer, choose Continue to send a NEW ordinary-text continuation explicitly quoting only the final question and answer; earlier work and answers will not be replayed. No new tool permissions or broader authorization are granted.",
+          { modal: true }, continueFromStructured)
+        : manualLateAnswer
         ? await vscode.window.showWarningMessage(
           "The original task already performed work, but the final ordinary-text reply has no confirmed execution afterwards. After inspecting this conversation, you may replay ONLY that final reply. The original task and earlier messages will not be resent. This does not grant a permission or resolve a pending approval.",
           { modal: true }, replayLatest)
@@ -676,7 +688,8 @@ export class AutoResumeController implements vscode.Disposable {
           "Full history contains one user input but cannot prove whether it started. Choose only after checking the original conversation. This queues one exact action, not additional execution permissions.",
           { modal: true }, replay, proceed,
         );
-      if (choice !== replay && choice !== replayLatest && choice !== proceed) return;
+      if (choice !== replay && choice !== replayLatest &&
+          choice !== continueFromStructured && choice !== proceed) return;
       const fresh = await readRecoveryHistory(this.client!, armed.threadId);
       const check = await materializePastedTxt(classifyRecoveryHistory(fresh, { nowMs: Date.now(), previous: plan,
         replaySourceTurnId: fresh.turns[0]?.id === prepared?.replayTurnId ? prepared?.replaySourceTurnId : undefined,
@@ -687,6 +700,12 @@ export class AutoResumeController implements vscode.Disposable {
         fresh.turns[0].id === plan.sourceTurnId &&
         canManuallyConfirmQuestionContinuation(fresh.turns[0]) &&
         check.reason === "unanswered_question_or_approval";
+      const revalidatedStructuredAnswer = manualStructuredAnswer && choice === continueFromStructured &&
+        !check.stale && check.reason === "multiple_unresolved_inputs" &&
+        check.candidate === "replay_input" && check.manualReplyKind === "structured_question_reply" &&
+        replayText(check) === replayText(plan) && replayText(check) !== undefined &&
+        check.manualReplayInput?.turnId === plan.manualReplayInput?.turnId &&
+        check.manualReplayInput?.messageId === plan.manualReplayInput?.messageId;
       const revalidatedLateAnswer = manualLateAnswer && choice === replayLatest &&
         !check.stale && check.reason === "multiple_unresolved_inputs" &&
         check.candidate === "replay_input" && replayText(check) !== undefined &&
@@ -697,18 +716,21 @@ export class AutoResumeController implements vscode.Disposable {
       if (!this.canMonitor() || !current || current.armedAtMs !== armed.armedAtMs ||
           current.threadId !== armed.threadId || current.dispatchPending || current.resumeTurnId ||
           !fresh.complete || check.fingerprint !== plan.fingerprint ||
-          !(revalidatedManualQuestion || revalidatedLateAnswer || revalidatedReplay) ||
+          !(revalidatedManualQuestion || revalidatedLateAnswer ||
+            revalidatedStructuredAnswer || revalidatedReplay) ||
           current.recoveryPlan?.fingerprint !== plan.fingerprint) {
         void vscode.window.showWarningMessage("Recovery changed while the dialog was open. The stale choice was not applied; review the latest input.");
         return;
       }
-      const action = choice === replay || choice === replayLatest ? "replay_input" as const : "continue" as const;
+      const action = choice === replay || choice === replayLatest ||
+        choice === continueFromStructured ? "replay_input" as const : "continue" as const;
       const approved: RecoveryPlan = {
         ...check, action,
         ...(manualQuestionContinue ? { candidate: "continue" as const } : {}),
         reason: manualQuestionContinue
           ? "user_confirmed_ambiguous_question_continue" : revalidatedLateAnswer
-          ? "user_confirmed_latest_answer_replay" : "user_confirmed_action",
+          ? "user_confirmed_latest_answer_replay" : revalidatedStructuredAnswer
+          ? "user_confirmed_last_structured_answer_continue" : "user_confirmed_action",
         approval: { action, fingerprint: check.fingerprint },
       };
       await this.saveArmed({ ...current, recoveryPlan: approved, replayAttempts: 0 });
