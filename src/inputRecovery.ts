@@ -408,7 +408,11 @@ function latestManualAnswerCandidate(turn: CodexTurn): SavedRecoveryInput["messa
   // Serialized structured answers are a separate protocol, not plain text to
   // be injected as a new conversational instruction.
   if (part.text.includes("<send_user_message_question_reply>")) return undefined;
-  if (!items.slice(1, lastIndex).some(item => record(item) && itemHasProgress(item))) return undefined;
+  if (!items.slice(1, lastIndex).some(item =>
+    record(item) && itemHasProgress(item) &&
+    !(item.type === "agentMessage" && Array.isArray(item.questions) && item.questions.length > 0))) {
+    return undefined;
+  }
   const beforeAnswer = items.slice(1, lastIndex);
   if (!beforeAnswer.some(item => record(item) && item.type === "agentMessage" &&
     (Array.isArray(item.questions) && item.questions.length > 0 ||
