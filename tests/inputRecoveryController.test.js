@@ -1017,3 +1017,54 @@ test('read-only interaction diagnosis can inspect a saved ambiguous historical s
     'codexAutoResume.recoveryDecisionHistory')), previous);
   assert.equal(h.sent.length, 0);
 });
+
+
+test('Review offers exact late-answer replay when prior work happened before quota failure', async t => {
+  const source = turn('late-answer');
+  source.items.push(
+    { type: 'fileChange', id: 'already-edited', status: 'completed', changes: [{ path: 'previous-edit' }] },
+    { type: 'agentMessage', id: 'scope-q', text: 'Confirm historical range?', questions: [{ id: 'scope' }] },
+    user('reply', '批准上述历史查询范围'),
+  );
+  const h = setup(t, { turns: [source], available: false });
+  await h.tick();
+  assert.equal(h.state().recoveryPlan.reason, 'multiple_unresolved_inputs');
+  assert.equal(h.state().recoveryPlan.candidate, 'replay_input');
+  assert.equal(h.sent.length, 0);
+  h.choose(choices => {
+    assert.deepEqual(choices, ['Replay latest saved answer only after quota recovery']);
+    return choices[0];
+  });
+  await h.controller.reviewRecoveryInput();
+  const saved = h.state().recoveryPlan;
+  assert.equal(saved.action, 'replay_input');
+  assert.equal(saved.reason, 'user_confirmed_latest_answer_replay');
+  assert.deepEqual(saved.manualReplayInput, { turnId: source.id, messageId: 'reply' });
+  assert.equal(saved.inputs.length, 2);
+  assert.equal(h.sent.length, 0);
+  h.setQuota(quota(true));
+  h.advance(); await h.tick(); assert.equal(h.sent.length, 0);
+  h.advance(); await h.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].prompt, '批准上述历史查询范围');
+  assert.equal(h.sent[0].threadId, THREAD);
+  assert.deepEqual(h.sent[0].overrides, {});
+  h.advance(60000); await h.tick();
+  assert.equal(h.sent.length, 1);
+});
+
+test('late-answer manual approval must be invalidated if a new permission arrives during Review', async t => {
+  const source = turn('reply-guard');
+  source.items.push({ type: 'commandExecution', status: 'completed' },
+    { type: 'agentMessage', text: 'Confirm scope?' }, user('last-answer', 'Yes'));
+  const h = setup(t, { turns: [source], available: false });
+  await h.tick();
+  h.choose(choices => {
+    assert.deepEqual(choices, ['Replay latest saved answer only after quota recovery']);
+    source.items.splice(-1, 0, { type: 'dynamicToolCall', tool: 'request_permissions', status: 'inProgress' });
+    return choices[0];
+  });
+  await h.controller.reviewRecoveryInput();
+  assert.equal(h.state().recoveryPlan.action, 'needs_review');
+  assert.equal(h.sent.length, 0);
+});
