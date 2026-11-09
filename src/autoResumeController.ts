@@ -116,9 +116,9 @@ export class AutoResumeController implements vscode.Disposable {
         `Codex Auto Resume enabled and verifying ${armed.resumeTurnId ? `resume turn ${armed.resumeTurnId}` : "a pending continuation"} for ${armed.threadId}.`,
       );
     } else if (armed) {
-      const reset = new Date(armed.resetAtMs).toLocaleString();
+      const reset = armed.resetAtMs > 0 ? new Date(armed.resetAtMs).toLocaleString() : "not provided by the backend";
       void vscode.window.showInformationMessage(
-        `Codex Auto Resume enabled and armed for ${armed.threadId}. Expected backend reset ${reset}; confirmed quota availability can resume earlier.`,
+        `Codex Auto Resume enabled and armed for ${armed.threadId}. Expected backend reset ${reset}; the extension will only send when account quota availability is confirmed.`,
       );
     } else {
       void vscode.window.showInformationMessage("Codex Auto Resume enabled.");
@@ -159,8 +159,11 @@ export class AutoResumeController implements vscode.Disposable {
     if (!armed) {
       const pending = this.pendingQuotaCandidate();
       if (pending) {
+        const reason = pending.reason
+          ? `the structured quota error is ${pending.reason}, but an actionable reset time is not yet confirmed`
+          : "the quota cause or account status is not yet confirmed";
         void vscode.window.showInformationMessage(
-          `Codex Auto Resume is monitoring interrupted turn ${pending.turnId} on thread ${pending.threadId}, but account quota state is temporarily unavailable. It will arm only after quota interruption is confirmed.${suffix}`,
+          `Codex Auto Resume preserved interrupted turn ${pending.turnId} on thread ${pending.threadId}; ${reason}. No continuation will be sent until quota availability is independently verified. Workspace credit depletion may require owner action rather than a timed reset.${suffix}`,
         );
         return;
       }
@@ -193,7 +196,7 @@ export class AutoResumeController implements vscode.Disposable {
       );
       return;
     }
-    const reset = new Date(armed.resetAtMs).toLocaleString();
+    const reset = armed.resetAtMs > 0 ? new Date(armed.resetAtMs).toLocaleString() : "unavailable (possibly workspace credit depletion)";
     const action = armed.recoveryPlan?.action === "replay_input"
       ? armed.recoveryPlan.manualReplyKind === "structured_question_reply"
         ? "continue from the last saved structured question answer"
@@ -1999,7 +2002,7 @@ export class AutoResumeController implements vscode.Disposable {
     this.statusBar.text = queued ? `$(clock) Codex Resume: Armed (+${queued})` : this.availabilityCandidate
       ? "$(sync) Codex Resume: Confirming availability"
       : "$(clock) Codex Resume: Armed (awaiting availability)";
-    this.statusBar.tooltip = `Thread ${armed.threadId}; expected backend reset ${new Date(armed.resetAtMs).toLocaleString()}; confirmed quota availability can resume earlier`;
+    this.statusBar.tooltip = `Thread ${armed.threadId}; backend reset ${armed.resetAtMs > 0 ? new Date(armed.resetAtMs).toLocaleString() : "not supplied"}; sending requires confirmed quota availability`;
 
   }
 }
