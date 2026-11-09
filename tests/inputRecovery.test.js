@@ -899,7 +899,9 @@ test('structured last-question recovery rejects extra tasks, unacknowledged earl
   const last = base.items.at(-2);
   const variants = [
     [...beforeFinal, last, user('new-task', 'Stop and change the project')],
-    [...base.items.slice(0, 5), ...base.items.slice(6)],
+    // Remove both the prior acknowledgement and the later spoken question;
+    // a matching native question tool alone is not positive agent progress.
+    [...base.items.slice(0, 5), base.items[6], ...base.items.slice(8)],
     [...beforeFinal, { type: 'dynamicToolCall', tool: 'request_permissions', status: 'inProgress' }, last],
     [...base.items.slice(0, -1), { type: 'fileChange', id: 'after-final', status: 'completed' }],
     [...base.items.slice(0, -1), { type: 'future_unknown_item' }],
@@ -912,10 +914,10 @@ test('structured last-question recovery rejects extra tasks, unacknowledged earl
       { type: 'dynamicToolCall', id: 'another-pending', tool: 'request_user_input_async', status: 'inProgress' },
       last],
   ];
-  for (const items of variants) {
+  for (const [index, items] of variants.entries()) {
     const p = classify(history(failed('not-safe', items)));
-    assert.notEqual(p.manualReplyKind, 'structured_question_reply');
-    assert.notEqual(p.reason, 'user_confirmed_last_structured_answer_continue');
+    assert.notEqual(p.manualReplyKind, 'structured_question_reply', 'unsafe variant ' + index);
+    assert.notEqual(p.reason, 'user_confirmed_last_structured_answer_continue', 'unsafe variant ' + index);
   }
 });
 
