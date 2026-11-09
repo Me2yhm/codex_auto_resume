@@ -755,3 +755,77 @@ test('manual question fallback rejects an explicit pending question, unknown act
     assert.equal(canManuallyConfirmQuestionContinuation(turn), false);
   }
 });
+
+
+test('quota after a late plain-text answer offers manual last-input replay without restarting prior work', () => {
+  const source = failed('answer-hit-limit', [
+    user('original-scope', 'Compare historical query ranges.'),
+    { type: 'fileChange', id: 'earlier-work', status: 'completed', changes: [{ path: 'already-edited' }] },
+    { type: 'agentMessage', id: 'scope-question', text: 'Confirm the historical query range?',
+      questions: [{ id: 'scope-question-id' }] },
+    user('scope-answer', '批准上述历史查询范围'),
+    { type: 'sleep', id: 'after-reply' },
+  ]);
+  const first = classify(history(source));
+  assert.equal(first.action, 'needs_review');
+  assert.equal(first.reason, 'multiple_unresolved_inputs');
+  assert.equal(first.candidate, 'replay_input');
+  assert.deepEqual(first.manualReplayInput, { turnId: source.id, messageId: 'scope-answer' });
+  assert.equal(replayText(first), '批准上述历史查询范围');
+  assert.equal(first.inputs.length, 2);
+  const approved = { ...first, action: 'replay_input', reason: 'user_confirmed_latest_answer_replay',
+    approval: { action: 'replay_input', fingerprint: first.fingerprint } };
+  const next = classify(history(source), { previous: approved, nowMs: NOW + 10_000 });
+  assert.equal(next.action, 'replay_input');
+  assert.equal(next.reason, 'user_confirmed_latest_answer_replay');
+  assert.equal(replayText(next), '批准上述历史查询范围');
+  assert.equal(matchesReplayedInput(failed('replayed-answer', [user('replayed', '批准上述历史查询范围')]), next), true);
+  assert.equal(matchesReplayedInput(failed('wrong-replay', [user('other', 'Compare historical query ranges.')]), next), false);
+  assert.equal(JSON.stringify(recoveryDiagnostic(next)).includes('批准上述历史查询范围'), false);
+});
+
+test('late-answer recovery is never automatic, even with userOnly replay opt-in', () => {
+  const source = failed('answer-hit-limit', [user('initial'), { type: 'commandExecution', status: 'completed' },
+    { type: 'agentMessage', text: 'Confirm scope?' }, user('answer', 'Yes')]);
+  const first = classify(history(source), { policy: 'replayStableUserOnly' });
+  assert.equal(first.action, 'needs_review');
+  assert.equal(first.candidate, 'replay_input');
+  const again = classify(history(source), { previous: first, nowMs: NOW + 60_000, policy: 'replayStableUserOnly' });
+  assert.equal(again.action, 'needs_review');
+});
+
+test('late-answer permission, malformed or unproven execution cannot be manually replayed', () => {
+  const base = [user('initial'), { type: 'commandExecution', id: 'worked', status: 'completed' },
+    { type: 'agentMessage', id: 'question', text: 'Confirm scope?' }, user('answer', 'Yes')];
+  const cases = [
+    [user('initial'), { type: 'agentMessage', text: 'Question?' }, user('answer', 'Yes')],
+    [user('initial'), { type: 'commandExecution', status: 'completed' }, user('answer', 'Yes')],
+    [...base.slice(0, 3), { type: 'dynamicToolCall', tool: 'request_permissions', status: 'inProgress' }, base[3]],
+    [...base, { type: 'dynamicToolCall', tool: 'request_approval', status: 'inProgress' }],
+    [...base, { type: 'dynamicToolCall', tool: 'request_user_input', status: 'inProgress' }],
+    [...base, { type: 'futureUnknownItem' }],
+    [...base, { type: 'commandExecution', status: 'completed' }],
+    [...base.slice(0, 3), structuredAnswer('call_example', 'Yes')],
+    [...base, user('third-input', 'Another change')],
+  ];
+  for (const items of cases) {
+    const plan = classify(history(failed('blocked-case', items)));
+    assert.equal(plan.action, 'needs_review');
+    assert.equal(plan.candidate, undefined);
+    assert.equal(plan.manualReplayInput, undefined);
+  }
+});
+
+test('late-answer approval cannot survive an input or question change', () => {
+  const source = failed('late', [user('start'), { type: 'commandExecution', status: 'completed' },
+    { type: 'agentMessage', text: 'Confirm scope?' }, user('answer', 'Yes')]);
+  const first = classify(history(source));
+  const approved = { ...first, action: 'replay_input', reason: 'user_confirmed_latest_answer_replay',
+    approval: { action: 'replay_input', fingerprint: first.fingerprint } };
+  const changed = failed('late', [...source.items.slice(0, -1), user('answer', 'No')]);
+  const after = classify(history(changed), { previous: approved, nowMs: NOW + 10000 });
+  assert.equal(after.action, 'needs_review');
+  assert.equal(after.approval, undefined);
+  assert.equal(after.manualReplayInput.messageId, 'answer');
+  assert.equal(after.fingerprint === first.fingerprint, false);
+});
