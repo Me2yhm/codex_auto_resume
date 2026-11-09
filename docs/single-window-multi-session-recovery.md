@@ -85,3 +85,18 @@ Native acceptance:
 3. If the report finds a quota-failed matching turn, verify it can be saved without adopting any foreign-window thread. If the newest turn is not failed/interrupted, the official UI may have rejected the message **before any App Server turn was recorded**. That case requires a separately verified native IPC capture/explicit enrollment design and is not solved by scanning more threads.
 4. Check \`ordinaryUsageAllowed\`, \`rateLimitReachedType\` and whether an actual reset time exists, without inventing reset times or sending requests while blocked.
 5. Validate exact Local vs Remote extension-host installation using the extension host indicator and a real Codex owner. The GitHub Actions mocks cannot prove remote process account/store identity.
+
+
+## 2026-11-09: exact Remote SSH conversation and UI placeholder Turn
+
+A Codex Output \`Rebinding placeholder latest turn to incoming event conversationId=<UUID> turnId=<UUID>\` line provides a stronger **candidate identity** than a workspace-wide newest-thread scan. However, a UI placeholder lifecycle event is not conclusive evidence that the App Server persisted a completed/failed Turn, or that the user prompt was accepted.
+
+The new VS Code command **Codex Auto Resume: Inspect Exact Thread (Read-Only)** asks for the two UUIDs separately, and performs a bounded, paginated \`thread/turns/list\` lookup through the same App Server executable and extension host. It distinguishes:
+- exact Turn exists and has structured \`usageLimitExceeded\` or \`rateLimitExceeded\`;
+- exact Turn exists but has \`completed\` / other non-quota status;
+- UI-referenced Turn is absent from the bounded persisted history (potential transient placeholder or wrong App Server host);
+- unavailable App Server read.
+
+The report contains only hashed IDs, short allowlisted status/error categories, host identity, whether this window has a matching editor tab, and an account-quota summary. It is created as an unsaved editor document; it does not write \`workspaceState\`, choose a recovery action, dispatch an IPC message, or assume a placeholder is a recoverable failed turn. **An exact UUID provided by the user is a diagnostic locator, not automatic permission to restore a message.**
+
+Native Remote SSH acceptance: paste the target \`conversationId\` and \`turnId\` from the same Codex Output line. If the exact Turn is missing, check whether the original prompt is visibly preserved in the Codex composer; do not create an inferred continuation from the screenshot or from the quota banner. If the Turn has a structured quota failure, investigate why normal window-scoped discovery did not register the target, preserving ownership and duplicate-send protections.
