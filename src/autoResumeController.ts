@@ -350,10 +350,13 @@ export class AutoResumeController implements vscode.Disposable {
         }
         report.scans.push(scan);
       }
-      const scoped = report.scans[0] as { workspaceMatches?: number };
-      const broad = report.scans[1] as { workspaceMatches?: number };
-      if (scoped.workspaceMatches === 0 && (broad.workspaceMatches ?? 0) > 0) {
-        report.interpretation.push("Recent threads are visible without the vscode source filter but not with it. Confirm exact window ownership before any recovery dispatch.");
+      const scoped = report.scans[0] as { workspaceMatches?: number; visibleTabMatches?: number };
+      const broad = report.scans[1] as { workspaceMatches?: number; visibleTabMatches?: number };
+      // A thread from the same workspace is not necessarily from this window.
+      // Diagnose when this window's exact editor ID exists only outside the
+      // source-filtered list, even if that list contains unrelated cwd matches.
+      if ((scoped.visibleTabMatches ?? 0) === 0 && (broad.visibleTabMatches ?? 0) > 0) {
+        report.interpretation.push("The current window's Codex editor thread is visible without the vscode source filter but not with it. Confirm exact window ownership before any recovery dispatch.");
       }
       if (report.scans.every(scan => (scan as { workspaceMatches?: number }).workspaceMatches === 0)) {
         report.interpretation.push("No recent App Server conversation matched an open workspace. Check Local/Remote extension hosts, session cwd and the Codex executable/account.");
