@@ -32,6 +32,7 @@
     "onCommand:codexAutoResume.disable",
     "onCommand:codexAutoResume.status",
     "onCommand:codexAutoResume.diagnoseMonitoring",
+    "onCommand:codexAutoResume.diagnoseExactThread",
     "onCommand:codexAutoResume.resumeNow",
     "onCommand:codexAutoResume.testOfficialSubmitBridge",
     "onCommand:codexAutoResume.testOfficialUiIpcBridge",
@@ -63,6 +64,10 @@
       {
         "command": "codexAutoResume.diagnoseMonitoring",
         "title": "Codex Auto Resume: Diagnose Monitoring (Read-Only)"
+      },
+      {
+        "command": "codexAutoResume.diagnoseExactThread",
+        "title": "Codex Auto Resume: Inspect Exact Thread (Read-Only)"
       },
       {
         "command": "codexAutoResume.resumeNow",
