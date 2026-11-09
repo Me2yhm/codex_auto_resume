@@ -665,7 +665,16 @@ export class AutoResumeController implements vscode.Disposable {
         const detail = plan.reason.startsWith("attachment_")
           ? `TXT attachment is blocked by ${plan.reason}; fix or restore the original file in the same host. Review cannot waive attachment integrity checks.`
           : "The input is incomplete, unsupported, multiple, oversized, or has an unresolved interaction that cannot safely be replayed.";
-        void vscode.window.showWarningMessage(`${detail} Nothing was sent.`);
+        if (plan.reason === "multiple_unresolved_inputs") {
+          const inspect = "Inspect question/approval evidence (read-only)";
+          const selected = await vscode.window.showWarningMessage(
+            `Recovery has ${plan.inputs.length} saved user inputs, but this history does not prove a safe final reply to resume. ${detail} No recovery was sent. You can inspect the exact recorded interaction evidence without changing recovery state.`,
+            { modal: true }, inspect,
+          );
+          if (selected === inspect) await this.inspectRecoveryInteractions();
+        } else {
+          void vscode.window.showWarningMessage(`${detail} Nothing was sent.`);
+        }
         return;
       }
       const replay = "Replay saved input after quota recovery";
