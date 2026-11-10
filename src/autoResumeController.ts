@@ -2019,21 +2019,25 @@ export class AutoResumeController implements vscode.Disposable {
       ...(journal?.pending ? [journal.pending.threadId] : [])];
     const recentMinutes = Math.max(5, vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 480));
     const recentCutoffMs = Date.now() - recentMinutes * 60_000;
-    // A thread discovered by cwd alone is NOT evidence that this window owns
-    // it. If the window exposes Codex editor tabs, filter DURING pagination,
-    // not after selecting the newest workspace thread. Otherwise an unrelated
-    // more-recent conversation can indefinitely conceal an interrupted one.
+    // A cwd match establishes workspace membership, NOT window ownership.
+    // If this window has explicit Codex editor tabs, require their exact IDs
+    // during selection so a newer foreign thread never hides local work.
     const visibleIds = this.windowConversationIds();
     const modes = [
       { exact: true, filterSource: true },
       { exact: false, filterSource: true },
       ...(visibleIds.size ? [{ exact: false, filterSource: false }] : []),
     ];
+    let best: CodexThread | undefined;
+    let bestMode: "workspace-root" | "workspace-descendant" | "window-visible-other-source" | undefined;
     let staleExact: CodexThread | undefined;
     for (const { exact, filterSource } of modes) {
       let cursor: string | null = null;
       const seen = new Set<string>();
-      // Bound work even if an old server returns a nonterminating cursor chain.
+      // The server sorts by updated_at. Find the freshest eligible entry from
+      // EACH source/query mode, then compare across modes. Previously the first
+      // nonstale exact-cwd match returned immediately and could hide a much
+      // newer quota-failed descendant of another root in a multi-root workspace.
       for (let page = 0; page < 20; page += 1) {
         let response: ThreadListResponse;
         try {
@@ -2049,23 +2053,25 @@ export class AutoResumeController implements vscode.Disposable {
           break;
         }
         if (!Array.isArray(response?.data)) return undefined;
+        let candidate: CodexThread | undefined;
         for (const thread of response.data) {
           if (!thread || typeof thread.id !== "string" || typeof thread.cwd !== "string" ||
               !Number.isFinite(thread.updatedAt) || isPrimerThread(thread, primerState, hostIds) ||
               !isThreadCwdInsideWorkspace(thread.cwd, folders) ||
               (visibleIds.size > 0 && !visibleIds.has(thread.id.toLowerCase()))) continue;
           if (thread.updatedAt * 1000 < recentCutoffMs) {
-            if (exact && !staleExact) staleExact = thread;
+            if (exact && (!staleExact || thread.updatedAt > staleExact.updatedAt)) staleExact = thread;
             continue;
           }
-          if (!exact) {
-            const key = `workspace-fallback:${thread.id}:${thread.cwd}:${filterSource}`;
-            if (key !== this.lastThreadSelectionDiagnostic) {
-              this.output.appendLine(`[auto-resume] selected recent ${filterSource ? "workspace-descendant" : "window-visible remote-source"} thread ${thread.id} after scoped lookup`);
-              this.lastThreadSelectionDiagnostic = key;
-            }
-          } else this.lastThreadSelectionDiagnostic = undefined;
-          return thread;
+          if (!candidate || thread.updatedAt > candidate.updatedAt) candidate = thread;
+        }
+        if (candidate) {
+          if (!best || candidate.updatedAt > best.updatedAt) {
+            best = candidate;
+            bestMode = exact ? "workspace-root" : filterSource
+              ? "workspace-descendant" : "window-visible-other-source";
+          }
+          break;
         }
         const next = response.nextCursor;
         if (!next || seen.has(next)) break;
@@ -2073,7 +2079,17 @@ export class AutoResumeController implements vscode.Disposable {
         cursor = next;
       }
     }
-    // Preserve the previous stale-thread diagnostic path; it never arms stale work.
+    if (best) {
+      const diagnosticKey = `selected:${best.id}:${bestMode}`;
+      if (this.lastThreadSelectionDiagnostic !== diagnosticKey) {
+        this.output.appendLine(
+          `[auto-resume] selected newest eligible ${bestMode} thread ${best.id} across workspace listing modes`,
+        );
+        this.lastThreadSelectionDiagnostic = diagnosticKey;
+      }
+      return best;
+    }
+    // Stale exact threads may be displayed in diagnostics, never armed.
     return staleExact;
   }
 
