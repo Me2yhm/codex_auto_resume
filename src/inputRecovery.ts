@@ -1,6 +1,9 @@
 import { createHash } from "crypto";
 import type { CodexTurn } from "./types";
-import { answeredQuestionFollowedByWork } from "./answeredQuestionRecovery";
+import {
+  answeredQuestionFollowedByWork, finalStructuredAnswerAwaitingWork,
+  structuredReplyContinuationText,
+} from "./answeredQuestionRecovery";
 
 export type RecoveryAction = "continue" | "replay_input" | "needs_review";
 export type UserOnlyPolicy = "review" | "replayStableUserOnly";
@@ -69,6 +72,10 @@ export interface RecoveryPlan {
   candidate?: "continue" | "replay_input";
   reason: string;
   inputs: SavedRecoveryInput[]; // oldest first, never silently retain only the last
+  /** Exact final ordinary text input permitted for human-approved replay only. */
+  manualReplayInput?: { turnId: string; messageId: string };
+  /** A structured question reply must be converted into an explicit user-reviewed continuation. */
+  manualReplyKind?: "structured_question_reply";
   evidence: RecoveryEvidence[];
   stableSinceMs: number;
   observedAtMs: number;
@@ -140,9 +147,13 @@ export function recoveryFingerprint(history: RecoveryHistory): string {
 }
 
 /** Obtain the original plain text, before any pasted-file expansion. */
-export function originalReplayText(plan: Pick<RecoveryPlan, "inputs">): string | undefined {
-  if (plan.inputs.length !== 1) return undefined;
-  const content = plan.inputs[0].content;
+export function originalReplayText(plan: Pick<RecoveryPlan, "inputs" | "manualReplayInput">): string | undefined {
+  const selected = plan.manualReplayInput
+    ? plan.inputs.find(input => input.turnId === plan.manualReplayInput?.turnId &&
+        input.messageId === plan.manualReplayInput?.messageId)
+    : plan.inputs.length === 1 ? plan.inputs[0] : undefined;
+  if (!selected) return undefined;
+  const content = selected.content;
   if (content.length !== 1 || !record(content[0])) return undefined;
   const part = content[0];
   if (part.type !== "text" || typeof part.text !== "string" || !part.text.trim() ||
@@ -240,9 +251,15 @@ function verifiedPastedTxtSnapshots(
 
 /** The request body remains the exact original serialized input. TXT is sent
  * separately as official UI context.attachments, never appended to the body. */
-export function replayText(plan: Pick<RecoveryPlan, "inputs" | "pastedTxtSnapshots" | "attachmentIntegrity">): string | undefined {
+export function replayText(plan: Pick<RecoveryPlan, "inputs" | "manualReplayInput" |
+    "manualReplyKind" | "pastedTxtSnapshots" | "attachmentIntegrity">): string | undefined {
   const original = originalReplayText(plan);
   if (original === undefined) return undefined;
+  if (plan.manualReplyKind === "structured_question_reply") {
+    if (!plan.manualReplayInput) return undefined;
+    return structuredReplyContinuationText({ type: "userMessage",
+      content: [{ type: "text", text: original, text_elements: [] }] });
+  }
   const refs = pastedTxtReferences(original);
   if (!refs.present) return original;
   return verifiedPastedTxtSnapshots(plan, original, refs) ? original : undefined;
@@ -274,9 +291,15 @@ export function replayAttachments(
 export function matchesReplayedInput(turn: CodexTurn, plan: RecoveryPlan): boolean {
   if (turn.itemsView !== "full" || !Array.isArray(turn.items)) return false;
   const users = turn.items.filter(item => record(item) && item.type === "userMessage");
-  if (users.length !== 1 || !record(users[0]) || plan.inputs.length !== 1) return false;
-  const originalMatch = canonical(users[0].content) === canonical(plan.inputs[0].content);
-  if (!originalMatch) return false;
+  const source = plan.manualReplayInput
+    ? plan.inputs.find(input => input.turnId === plan.manualReplayInput?.turnId &&
+        input.messageId === plan.manualReplayInput?.messageId)
+    : plan.inputs.length === 1 ? plan.inputs[0] : undefined;
+  if (users.length !== 1 || !record(users[0]) || !source) return false;
+  const expectedInput = plan.manualReplyKind === "structured_question_reply"
+    ? [{ type: "text", text: replayText(plan), text_elements: [] }]
+    : source.content;
+  if (canonical(users[0].content) !== canonical(expectedInput)) return false;
   const original = originalReplayText(plan) ?? "";
   const refs = pastedTxtReferences(original);
   if (!refs.present) return true;
@@ -373,6 +396,52 @@ export function questionSignals(items: unknown[]): QuestionSignal[] {
     if (signals.length >= 16) break;
   }
   return signals;
+}
+
+/**
+ * A failed turn may contain completed work, a subsequent user question, and a
+ * final plain-text answer rejected by quota before any post-answer activity.
+ * Offer only that exact final answer to a human. No automatic approval, no
+ * re-running the original task, and never infer question/permission resolution.
+ */
+function latestManualAnswerCandidate(turn: CodexTurn): SavedRecoveryInput["messageId"] | undefined {
+  if (!isQuotaFailure(turn) || turn.itemsView !== "full" || !Array.isArray(turn.items)) return undefined;
+  const items = turn.items;
+  if (items.length < 4 || !items.every(knownHistoryItem)) return undefined;
+  const users = items.flatMap((item, index) => record(item) && item.type === "userMessage" ? [index] : []);
+  if (users.length !== 2 || users[0] !== 0) return undefined;
+  const lastIndex = users[1];
+  const reply = items[lastIndex];
+  if (!record(reply) || typeof reply.id !== "string" || !reply.id ||
+      !Array.isArray(reply.content) || reply.content.length !== 1) return undefined;
+  const part = reply.content[0];
+  if (!record(part) || part.type !== "text" || typeof part.text !== "string" ||
+      !part.text.trim() || !Array.isArray(part.text_elements) || part.text_elements.length ||
+      Object.keys(part).some(key => !["type", "text", "text_elements"].includes(key))) return undefined;
+  // Serialized structured answers are a separate protocol, not plain text to
+  // be injected as a new conversational instruction.
+  if (part.text.includes("<send_user_message_question_reply>")) return undefined;
+  if (!items.slice(1, lastIndex).some(item =>
+    record(item) && itemHasProgress(item) &&
+    !(item.type === "agentMessage" && Array.isArray(item.questions) && item.questions.length > 0))) {
+    return undefined;
+  }
+  const beforeAnswer = items.slice(1, lastIndex);
+  if (!beforeAnswer.some(item => record(item) && item.type === "agentMessage" &&
+    (Array.isArray(item.questions) && item.questions.length > 0 ||
+      typeof item.text === "string" && item.text.trim().length > 0))) return undefined;
+  // Anything after the reply except known neutral waiting metadata may be an
+  // acknowledgement or side effect: do not risk duplicate delivery.
+  if (!items.slice(lastIndex + 1).every(item =>
+    record(item) && NEUTRAL_CONTEXT.has(String(item.type)))) return undefined;
+  for (const item of items) {
+    if (!record(item)) return undefined;
+    if (item.type === "dynamicToolCall" && QUESTION_TOOLS.has(String(item.tool)) &&
+        item.status !== "completed") return undefined;
+    if (Array.isArray(item.questions) &&
+        item.questions.some(question => questionState(question) === "pending")) return undefined;
+  }
+  return reply.id;
 }
 
 /** Explicit user confirmation may release an AMBIGUOUS historical question
@@ -483,7 +552,58 @@ export function classifyRecoveryHistory(
     return { ...plan, action: "continue", candidate: "continue",
       reason: "answered_question_followed_by_execution" };
   }
-  if (plan.inputs.length !== 1) return { ...plan, reason: "multiple_unresolved_inputs" };
+  if (plan.inputs.length !== 1) {
+    // A quota failure can occur after TWO OR MORE native question replies.
+    // The last reply was already submitted by the user, but no subsequent
+    // Codex work is recorded. Never replay a native serializer envelope as
+    // ordinary text or re-send earlier acknowledged answers.
+    const finalStructuredId = pending.length === 1
+      ? finalStructuredAnswerAwaitingWork(latest) : undefined;
+    const finalStructured = finalStructuredId
+      ? plan.inputs.find(input => input.turnId === latest.id && input.messageId === finalStructuredId)
+      : undefined;
+    if (finalStructured) {
+      const finalIndex = items.findIndex(item =>
+        record(item) && item.type === "userMessage" && item.id === finalStructuredId);
+      const priorWork = items.slice(1, finalIndex).some(item => itemHasProgress(item) &&
+        !(record(item) && item.type === "agentMessage" &&
+          Array.isArray(item.questions) && item.questions.length > 0));
+      if (priorWork) {
+        const manual = { ...plan, manualReplyKind: "structured_question_reply" as const,
+          manualReplayInput: { turnId: finalStructured.turnId, messageId: finalStructured.messageId },
+          candidate: "replay_input" as const, reason: "multiple_unresolved_inputs" };
+        if (replayText(manual) !== undefined) {
+          if (unchanged && previous?.approval?.action === "replay_input" &&
+              previous.approval.fingerprint === fingerprint &&
+              previous.manualReplyKind === "structured_question_reply" &&
+              previous.manualReplayInput?.turnId === finalStructured.turnId &&
+              previous.manualReplayInput?.messageId === finalStructured.messageId) {
+            return { ...manual, action: "replay_input",
+              reason: "user_confirmed_last_structured_answer_continue", approval: previous.approval };
+          }
+          return manual;
+        }
+      }
+    }
+    const lastMessageId = pending.length === 1 ? latestManualAnswerCandidate(latest) : undefined;
+    const selected = lastMessageId
+      ? plan.inputs.find(input => input.turnId === latest.id && input.messageId === lastMessageId)
+      : undefined;
+    if (selected) {
+      const manual = { ...plan, manualReplayInput: { turnId: selected.turnId, messageId: selected.messageId },
+        candidate: "replay_input" as const, reason: "multiple_unresolved_inputs" };
+      if (originalReplayText(manual) !== undefined &&
+          unchanged && previous?.approval?.action === "replay_input" &&
+          previous.approval.fingerprint === fingerprint &&
+          previous.manualReplayInput?.turnId === selected.turnId &&
+          previous.manualReplayInput?.messageId === selected.messageId) {
+        return { ...manual, action: "replay_input", reason: "user_confirmed_latest_answer_replay",
+          approval: previous.approval };
+      }
+      return manual;
+    }
+    return { ...plan, reason: "multiple_unresolved_inputs" };
+  }
   if (waitingOnQuestion(items)) {
     if (unchanged && previous?.approval?.action === "continue" &&
         previous.approval.fingerprint === fingerprint &&
@@ -521,6 +641,8 @@ export function classifyRecoveryHistory(
 export function recoveryDiagnostic(plan: RecoveryPlan): Record<string, unknown> {
   return { schemaVersion: 1, action: plan.action, candidate: plan.candidate ?? null,
     reason: plan.reason, sourceTurnId: plan.sourceTurnId, fingerprint: plan.fingerprint,
+    manualReplayInput: plan.manualReplayInput ?? null,
+    manualReplyKind: plan.manualReplyKind ?? null,
     observedAtMs: plan.observedAtMs, stableSinceMs: plan.stableSinceMs, stale: Boolean(plan.stale),
     replayableText: replayText(plan) !== undefined, evidence: plan.evidence,
     attachmentSha256: plan.pastedTxtSnapshots?.map(snapshot => snapshot.sha256) ?? [],

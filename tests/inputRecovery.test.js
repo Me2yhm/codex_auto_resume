@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { classifyRecoveryHistory, replayText, recoveryDiagnostic, MAX_INPUT_BYTES,
   hasUnambiguousInputProgress, questionSignals,
-  canManuallyConfirmQuestionContinuation } = require('../dist/inputRecovery');
+  canManuallyConfirmQuestionContinuation, matchesReplayedInput } = require('../dist/inputRecovery');
 const { readRecoveryHistory } = require('../dist/recoveryHistory');
 const NOW = 1_900_000_000_000;
 const input = (text = 'Original input\nCTP requires separate authorization.') => ({ type: 'text', text, text_elements: [] });
@@ -754,4 +754,184 @@ test('manual question fallback rejects an explicit pending question, unknown act
     const turn = failed('blocked', items);
     assert.equal(canManuallyConfirmQuestionContinuation(turn), false);
   }
+});
+
+
+test('quota after a late plain-text answer offers manual last-input replay without restarting prior work', () => {
+  const source = failed('answer-hit-limit', [
+    user('original-scope', 'Compare historical query ranges.'),
+    { type: 'fileChange', id: 'earlier-work', status: 'completed', changes: [{ path: 'already-edited' }] },
+    { type: 'agentMessage', id: 'scope-question', text: 'Confirm the historical query range?',
+      questions: [{ id: 'scope-question-id' }] },
+    user('scope-answer', '批准上述历史查询范围'),
+    { type: 'sleep', id: 'after-reply' },
+  ]);
+  const first = classify(history(source));
+  assert.equal(first.action, 'needs_review');
+  assert.equal(first.reason, 'multiple_unresolved_inputs');
+  assert.equal(first.candidate, 'replay_input');
+  assert.deepEqual(first.manualReplayInput, { turnId: source.id, messageId: 'scope-answer' });
+  assert.equal(replayText(first), '批准上述历史查询范围');
+  assert.equal(first.inputs.length, 2);
+  const approved = { ...first, action: 'replay_input', reason: 'user_confirmed_latest_answer_replay',
+    approval: { action: 'replay_input', fingerprint: first.fingerprint } };
+  const next = classify(history(source), { previous: approved, nowMs: NOW + 10_000 });
+  assert.equal(next.action, 'replay_input');
+  assert.equal(next.reason, 'user_confirmed_latest_answer_replay');
+  assert.equal(replayText(next), '批准上述历史查询范围');
+  assert.equal(matchesReplayedInput(failed('replayed-answer', [user('replayed', '批准上述历史查询范围')]), next), true);
+  assert.equal(matchesReplayedInput(failed('wrong-replay', [user('other', 'Compare historical query ranges.')]), next), false);
+  assert.equal(JSON.stringify(recoveryDiagnostic(next)).includes('批准上述历史查询范围'), false);
+});
+
+test('late-answer recovery is never automatic, even with userOnly replay opt-in', () => {
+  const source = failed('answer-hit-limit', [user('initial'), { type: 'commandExecution', status: 'completed' },
+    { type: 'agentMessage', text: 'Confirm scope?' }, user('answer', 'Yes')]);
+  const first = classify(history(source), { policy: 'replayStableUserOnly' });
+  assert.equal(first.action, 'needs_review');
+  assert.equal(first.candidate, 'replay_input');
+  const again = classify(history(source), { previous: first, nowMs: NOW + 60_000, policy: 'replayStableUserOnly' });
+  assert.equal(again.action, 'needs_review');
+});
+
+test('late-answer permission, malformed or unproven execution cannot be manually replayed', () => {
+  const base = [user('initial'), { type: 'commandExecution', id: 'worked', status: 'completed' },
+    { type: 'agentMessage', id: 'question', text: 'Confirm scope?' }, user('answer', 'Yes')];
+  const cases = [
+    [user('initial'), { type: 'agentMessage', text: 'Question?' }, user('answer', 'Yes')],
+    [user('initial'), { type: 'commandExecution', status: 'completed' }, user('answer', 'Yes')],
+    [...base.slice(0, 3), { type: 'dynamicToolCall', tool: 'request_permissions', status: 'inProgress' }, base[3]],
+    [...base, { type: 'dynamicToolCall', tool: 'request_approval', status: 'inProgress' }],
+    [...base, { type: 'dynamicToolCall', tool: 'request_user_input', status: 'inProgress' }],
+    [...base, { type: 'futureUnknownItem' }],
+    [...base, { type: 'commandExecution', status: 'completed' }],
+    [...base.slice(0, 3), structuredAnswer('call_example', 'Yes')],
+    [...base, user('third-input', 'Another change')],
+  ];
+  for (const items of cases) {
+    const plan = classify(history(failed('blocked-case', items)));
+    assert.equal(plan.action, 'needs_review');
+    assert.equal(plan.candidate, undefined);
+    assert.equal(plan.manualReplayInput, undefined);
+  }
+});
+
+test('late-answer approval cannot survive an input or question change', () => {
+  const source = failed('late', [user('start'), { type: 'commandExecution', status: 'completed' },
+    { type: 'agentMessage', text: 'Confirm scope?' }, user('answer', 'Yes')]);
+  const first = classify(history(source));
+  const approved = { ...first, action: 'replay_input', reason: 'user_confirmed_latest_answer_replay',
+    approval: { action: 'replay_input', fingerprint: first.fingerprint } };
+  const changed = failed('late', [...source.items.slice(0, -1), user('answer', 'No')]);
+  const after = classify(history(changed), { previous: approved, nowMs: NOW + 10000 });
+  assert.equal(after.action, 'needs_review');
+  assert.equal(after.approval, undefined);
+  assert.equal(after.manualReplayInput.messageId, 'answer');
+  assert.equal(after.fingerprint === first.fingerprint, false);
+});
+
+
+function nativeReply(messageId, callId, question, answer) {
+  const tag = 'send_user_message_question_reply';
+  const payload = [{ questionItemId: JSON.stringify(['request_user_input_async', callId, 0]), question, answer }];
+  return user(messageId, '<' + tag + '>\n' + JSON.stringify(payload) + '\n</' + tag + '>\n');
+}
+
+function multipleQuestionReplyQuotaTurn() {
+  return failed('realistic-multi-question-quota-turn', [
+    user('original-request', '# IDE context\nContinue the task'),
+    { type: 'fileChange', id: 'already-done', status: 'completed', changes: [{ path: 'already-updated-file' }] },
+    { type: 'agentMessage', id: 'first-question', text: 'Append diagnostic response to the local log?',
+      questions: [{ id: 'Q1' }] },
+    { type: 'dynamicToolCall', id: 'call_previous', tool: 'request_user_input_async', status: 'completed' },
+    nativeReply('first-reply', 'call_previous', 'Append the diagnostic record to the local log?', 'Done'),
+    { type: 'agentMessage', id: 'first-ack', text: 'Thanks, proceeding to the read-only check.' },
+    { type: 'commandExecution', id: 'pre-final-check', status: 'completed' },
+    { type: 'agentMessage', id: 'second-question', text: 'May I extend the read-only historical query?',
+      questions: [{ id: 'Q2' }] },
+    // Codex may persist an unresolved native question tool when the answer
+    // was submitted just as the account quota was exhausted.
+    { type: 'dynamicToolCall', id: 'call_final', tool: 'request_user_input_async', status: 'inProgress' },
+    nativeReply('last-reply', 'call_final',
+      'May I extend the read-only history query up to the current execution time?', 'Approve this historical range'),
+    { type: 'sleep', id: 'only-wait', durationMs: 500 },
+  ]);
+}
+
+test('three user messages: earlier structured reply acknowledged, latest reply quota-limited -> human-only continuation', () => {
+  const t = multipleQuestionReplyQuotaTurn();
+  const first = classify(history(t), { policy: 'replayStableUserOnly' });
+  assert.equal(first.action, 'needs_review');
+  assert.equal(first.reason, 'multiple_unresolved_inputs');
+  assert.equal(first.candidate, 'replay_input');
+  assert.equal(first.inputs.length, 3);
+  assert.deepEqual(first.manualReplayInput, { turnId: t.id, messageId: 'last-reply' });
+  assert.equal(first.manualReplyKind, 'structured_question_reply');
+  const request = replayText(first);
+  assert.match(request, /May I extend the read-only history query/);
+  assert.match(request, /Approve this historical range/);
+  assert.equal(request.includes('# IDE context'), false);
+  assert.equal(request.includes('Append the diagnostic record'), false);
+  assert.equal(request.includes('<send_user_message_question_reply>'), false);
+  assert.equal(request.includes('call_previous'), false);
+  assert.equal(request.includes('call_final'), false);
+  assert.equal(JSON.stringify(recoveryDiagnostic(first)).includes('Approve this historical range'), false);
+
+  // Stable history and opt-in policy still MUST NOT authorize an automatic send.
+  const stable = classify(history(t), { previous: first, nowMs: NOW + 60_000, policy: 'replayStableUserOnly' });
+  assert.equal(stable.action, 'needs_review');
+  const approved = { ...first, action: 'replay_input', reason: 'user_confirmed_last_structured_answer_continue',
+    approval: { action: 'replay_input', fingerprint: first.fingerprint } };
+  const next = classify(history(t), { previous: approved, nowMs: NOW + 61_000 });
+  assert.equal(next.action, 'replay_input');
+  assert.equal(next.reason, 'user_confirmed_last_structured_answer_continue');
+  assert.equal(replayText(next), request);
+  const resumed = failed('new-turn', [user('resumed-user-message', request)]);
+  assert.equal(matchesReplayedInput(resumed, next), true);
+  const mistakenEnvelope = failed('raw-reply', [nativeReply('wrong', 'call_final',
+    'May I extend the read-only history query up to the current execution time?', 'Approve this historical range')]);
+  assert.equal(matchesReplayedInput(mistakenEnvelope, next), false);
+});
+
+test('structured last-question recovery rejects extra tasks, unacknowledged earlier replies, approvals and post-reply execution', () => {
+  const base = multipleQuestionReplyQuotaTurn();
+  const beforeFinal = base.items.slice(0, -2);
+  const last = base.items.at(-2);
+  const variants = [
+    [...beforeFinal, last, user('new-task', 'Stop and change the project')],
+    // Remove both the prior acknowledgement and the later spoken question;
+    // a matching native question tool alone is not positive agent progress.
+    [...base.items.slice(0, 5), base.items[6], ...base.items.slice(8)],
+    [...beforeFinal, { type: 'dynamicToolCall', tool: 'request_permissions', status: 'inProgress' }, last],
+    [...base.items.slice(0, -1), { type: 'fileChange', id: 'after-final', status: 'completed' }],
+    [...base.items.slice(0, -1), { type: 'future_unknown_item' }],
+    [...base.items.slice(0, -1), { type: 'agentMessage', id: 'new-question', questions: [{ id: 'Q3' }] }],
+    [...base.items.slice(0, -2),
+      nativeReply('last-reply', 'call_previous', 'Repeat prior question?', 'Same reply')],
+    [...base.items.slice(0, -2),
+      user('last-reply', '<send_user_message_question_reply>broken</send_user_message_question_reply>')],
+    [...base.items.slice(0, -2),
+      { type: 'dynamicToolCall', id: 'another-pending', tool: 'request_user_input_async', status: 'inProgress' },
+      last],
+  ];
+  for (const [index, items] of variants.entries()) {
+    const p = classify(history(failed('not-safe', items)));
+    assert.notEqual(p.manualReplyKind, 'structured_question_reply', 'unsafe variant ' + index);
+    assert.notEqual(p.reason, 'user_confirmed_last_structured_answer_continue', 'unsafe variant ' + index);
+  }
+});
+
+test('structured final answer approval is revoked on any changed answer or permissions evidence', () => {
+  const t = multipleQuestionReplyQuotaTurn();
+  const p = classify(history(t));
+  const previous = { ...p, action: 'replay_input', reason: 'user_confirmed_last_structured_answer_continue',
+    approval: { action: 'replay_input', fingerprint: p.fingerprint } };
+  const changed = multipleQuestionReplyQuotaTurn();
+  changed.items.splice(-2, 1, nativeReply('last-reply', 'call_final',
+    'May I extend the read-only history query up to the current execution time?', 'Deny'));
+  const next = classify(history(changed), { previous, nowMs: NOW + 30_000 });
+  assert.equal(next.action, 'needs_review');
+  assert.equal(next.approval, undefined);
+  assert.notEqual(next.fingerprint, p.fingerprint);
+  assert.equal(replayText(next).includes('Approve this historical range'), false);
 });

@@ -40,9 +40,18 @@ function createVscodeMock(options = {}) {
     },
   });
 
+  const TabInputCustom = class {
+    constructor(id) {
+      this.viewType = "chatgpt.conversationEditor";
+      this.uri = { scheme: "openai-codex", authority: "route", path: `/local/${id}` };
+    }
+  };
+
   return {
     configuration,
     statusBars,
+    env: { remoteName: options.remoteName ?? undefined },
+    TabInputCustom,
     messages,
     executedCommands: commands,
     StatusBarAlignment: { Left: 1, Right: 2 },
@@ -59,6 +68,11 @@ function createVscodeMock(options = {}) {
       },
       async showWarningMessage(message) {
         messages.push({ type: "warning", message });
+      },
+      async showQuickPick(items) {
+        const selected = items[options.quickPickIndex ?? 0];
+        messages.push({ type: "quick-pick", message: selected?.label ?? "<none>" });
+        return selected;
       },
     },
     workspace: {

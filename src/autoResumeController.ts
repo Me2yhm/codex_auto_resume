@@ -1,4 +1,5 @@
 import * as path from "path";
+import { createHash } from "crypto";
 import * as vscode from "vscode";
 import {
   classifyRecoveryHistory, hasUnambiguousInputProgress, isQuotaFailure, recoveryDiagnostic,
@@ -10,6 +11,7 @@ import { buildInteractionTrace, readInteractionTurn } from "./recoveryInteractio
 import { materializePastedTxt, verifyPastedTxtBeforeSend } from "./recoveryAttachments";
 import { classifyQuotaAvailability } from "./quotaAvailability";
 import { RecoveryCoordinator } from "./recoveryCoordination";
+import { RECOVERY_BACKLOG_KEY, enqueueRecovery, readRecoveryBacklog, recoveryQueueSummary, selectNextRecovery } from "./recoveryQueue";
 import { isPrimerThread } from "./primerIdentity";
 import { readQuotaPrimerSendJournal } from "./quotaPrimerSendJournal";
 import { claimWorkResume, readWorkResumeDispatch } from "./workRecoveryDispatch";
@@ -114,9 +116,9 @@ export class AutoResumeController implements vscode.Disposable {
         `Codex Auto Resume enabled and verifying ${armed.resumeTurnId ? `resume turn ${armed.resumeTurnId}` : "a pending continuation"} for ${armed.threadId}.`,
       );
     } else if (armed) {
-      const reset = new Date(armed.resetAtMs).toLocaleString();
+      const reset = armed.resetAtMs > 0 ? new Date(armed.resetAtMs).toLocaleString() : "not provided by the backend";
       void vscode.window.showInformationMessage(
-        `Codex Auto Resume enabled and armed for ${armed.threadId}. Expected backend reset ${reset}; confirmed quota availability can resume earlier.`,
+        `Codex Auto Resume enabled and armed for ${armed.threadId}. Expected backend reset ${reset}; the extension will only send when account quota availability is confirmed.`,
       );
     } else {
       void vscode.window.showInformationMessage("Codex Auto Resume enabled.");
@@ -131,6 +133,7 @@ export class AutoResumeController implements vscode.Disposable {
     this.availabilityCandidate = undefined;
     await this.saveArmed(undefined);
     await this.context.workspaceState.update(PENDING_QUOTA_CANDIDATE_KEY, undefined);
+    await this.saveBacklog([]);
     await this.syncRecoveryPriority();
     this.renderStatus();
     void vscode.window.showInformationMessage("Codex Auto Resume disabled.");
@@ -142,28 +145,44 @@ export class AutoResumeController implements vscode.Disposable {
       void vscode.window.showInformationMessage("Codex Auto Resume is disabled.");
       return;
     }
+    let backlog: ArmedResume[];
+    try {
+      backlog = this.backlog();
+    } catch {
+      void vscode.window.showWarningMessage("Saved recovery backlog is invalid. Automatic recovery is blocked; inspect the Codex Auto Resume Output and preserve the workspace state.");
+      return;
+    }
+    const summary = recoveryQueueSummary(armed, backlog);
+    const suffix = summary.total > 1
+      ? ` Queue: ${summary.total} total; ${summary.ready} awaiting/ready; ${summary.requiresReview} need review; ${summary.verifying} verifying.`
+      : "";
     if (!armed) {
       const pending = this.pendingQuotaCandidate();
       if (pending) {
+        const reason = pending.reason
+          ? `the structured quota error is ${pending.reason}, but an actionable reset time is not yet confirmed`
+          : "the quota cause or account status is not yet confirmed";
         void vscode.window.showInformationMessage(
-          `Codex Auto Resume is monitoring an interrupted turn ${pending.turnId} on thread ${pending.threadId}, but account quota state is temporarily unavailable. It will arm only after quota interruption is confirmed.`,
+          `Codex Auto Resume preserved interrupted turn ${pending.turnId} on thread ${pending.threadId}; ${reason}. No continuation will be sent until quota availability is independently verified. Workspace credit depletion may require owner action rather than a timed reset.${suffix}`,
         );
         return;
       }
-      void vscode.window.showInformationMessage("Codex Auto Resume is enabled and monitoring; no interrupted thread is armed.");
+      void vscode.window.showInformationMessage(backlog.length
+        ? `Codex Auto Resume has ${backlog.length} saved interrupted conversation(s); no active dispatch. Open the matching Codex editors in this window to allow recovery.${suffix}`
+        : "Codex Auto Resume is enabled and monitoring; no interrupted thread is armed. Run Diagnose Monitoring (Read-Only) to check Remote SSH thread discovery, owner evidence and quota state.");
       return;
     }
     if (armed.resumeTurnId || armed.dispatchPending) {
       const phase = armed.resumeTurnId ? "verifying a resumed turn" : "checking a pending dispatch";
       const savedAction = armed.recoveryPlan?.action ?? "not yet classified";
       void vscode.window.showInformationMessage(
-        `Codex Auto Resume is ${phase} on thread ${armed.threadId}; saved recovery action: ${savedAction}. Review cannot replace an in-flight attempt. No duplicate will be sent. Use Inspect Recovery Input for details.`,
+        `Codex Auto Resume is ${phase} on thread ${armed.threadId}; saved recovery action: ${savedAction}. Review cannot replace an in-flight attempt. No duplicate will be sent. Use Inspect Recovery Input for details.${suffix}`,
       );
       return;
     }
     if (this.inputRecoveryEnabled() && !armed.recoveryPlan) {
       void vscode.window.showInformationMessage(
-        `Codex Auto Resume is Armed for thread ${armed.threadId} and classifying the failed input. No recovery action has been chosen; it will not send until classification completes.`,
+        `Codex Auto Resume is Armed for thread ${armed.threadId} and classifying the failed input. No recovery action has been chosen; it will not send until classification completes.${suffix}`,
       );
       return;
     }
@@ -173,15 +192,320 @@ export class AutoResumeController implements vscode.Disposable {
         ? "TXT attachment safety/integrity check blocked replay. Inspect the recovery input and restore the original managed attachment; Review cannot bypass this block."
         : "Run Review Recovery Input if the saved input is eligible.";
       void vscode.window.showWarningMessage(
-        `Codex Auto Resume saved the recovery target ${armed.threadId}, but input handling needs review (${reason}). ${detail} No continuation will be sent while evidence is unresolved.`,
+        `Codex Auto Resume saved the recovery target ${armed.threadId}, but input handling needs review (${reason}). ${detail} No continuation will be sent while evidence is unresolved.${suffix}`,
       );
       return;
     }
-    const reset = new Date(armed.resetAtMs).toLocaleString();
-    const action = armed.recoveryPlan?.action === "replay_input" ? "replay the saved input verbatim" : "continue existing work";
+    const reset = armed.resetAtMs > 0 ? new Date(armed.resetAtMs).toLocaleString() : "unavailable (possibly workspace credit depletion)";
+    const action = armed.recoveryPlan?.action === "replay_input"
+      ? armed.recoveryPlan.manualReplyKind === "structured_question_reply"
+        ? "continue from the last saved structured question answer"
+        : "replay the saved input verbatim"
+      : "continue existing work";
     void vscode.window.showInformationMessage(
-      `Codex Auto Resume is ${this.availabilityCandidate ? "Confirming availability" : "Armed (awaiting availability)"} for thread ${armed.threadId}. Expected backend reset ${reset}; confirmed quota availability can resume earlier. Recovery action: ${action}.`,
+      `Codex Auto Resume is ${this.availabilityCandidate ? "Confirming availability" : "Armed (awaiting availability)"} for thread ${armed.threadId}. Expected backend reset ${reset}; confirmed quota availability can resume earlier. Recovery action: ${action}.${suffix}`,
     );
+  }
+
+  /**
+   * Passive, metadata-only diagnosis of why a quota-failed conversation was
+   * not Armed. Never changes persisted recovery state or sends a message.
+   * No raw prompt, question, cwd, credential, log text or full thread ID is
+   * included in the user-visible report.
+   */
+  async diagnoseMonitoring(): Promise<void> {
+    const tabs = this.windowConversationIds();
+    const folders = vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) ?? [];
+    const hashId = (id: string): string => createHash("sha256").update(id).digest("hex").slice(0, 12);
+    const report: {
+      note: string;
+      extension: Record<string, unknown>;
+      recoveryState: Record<string, unknown>;
+      quota: Record<string, unknown>;
+      scans: Record<string, unknown>[];
+      interpretation: string[];
+    } = {
+      note: "READ-ONLY METADATA. Does not include user text, full thread IDs or absolute paths. No recovered input is sent or approved.",
+      extension: {
+        extensionHostPlatform: process.platform,
+        remoteName: vscode.env?.remoteName ?? null,
+        officialCodexAvailableInThisHost: Boolean(vscode.extensions?.getExtension("openai.chatgpt")),
+        workspacesCount: folders.length,
+        windowCodexEditorTabs: tabs.size,
+        extensionVersion: this.context.extension?.packageJSON?.version ?? "unknown",
+        enabled: this.enabled(),
+      },
+      recoveryState: {
+        armed: Boolean(this.armed()),
+        pendingQuotaCandidate: Boolean(this.pendingQuotaCandidate()),
+        backlogCount: 0,
+      },
+      quota: { status: "not_checked" },
+      scans: [],
+      interpretation: [],
+    };
+    try {
+      report.recoveryState.backlogCount = this.backlog().length;
+    } catch {
+      report.recoveryState.backlog = "invalid_saved_state";
+    }
+    try {
+      await this.ensureClient();
+    } catch {
+      report.quota = { status: "client_unavailable" };
+      report.interpretation.push("The monitoring App Server could not be started on this extension host.");
+    }
+    if (this.client?.isRunning) {
+      try {
+        const limits = await this.client.request<RateLimitsReadResponse>(
+          "account/rateLimits/read", { excludeResetCreditDetails: true }, 15_000,
+        );
+        const classified = classifyQuotaAvailability(limits);
+        const window = limits.rateLimits;
+        report.quota = {
+          status: classified.status,
+          reason: classified.reason,
+          ordinaryUsageAllowed: limits.ordinaryUsageAllowed ?? null,
+          reachedType: [
+            "rate_limit_reached", "workspace_owner_credits_depleted",
+            "workspace_member_credits_depleted", "workspace_owner_usage_limit_reached",
+            "workspace_member_usage_limit_reached",
+          ].includes(String(window?.rateLimitReachedType))
+            ? window?.rateLimitReachedType : null,
+          hasFutureResetTime: Boolean(this.computeResetAt(window)),
+        };
+        if (classified.status === "blocked" && !this.computeResetAt(window)) {
+          report.interpretation.push("Account usage is blocked without a future reset timestamp; a detected interrupted turn should remain saved as Pending, not be silently discarded.");
+        }
+      } catch {
+        report.quota = { status: "unavailable", reason: "rate_limit_read_failed" };
+      }
+      const modes = [
+        { label: "vscode_source", restrictSource: true },
+        { label: "all_sources_diagnostic_only", restrictSource: false },
+      ];
+      for (const mode of modes) {
+        const scan: {
+          kind: string;
+          returned: number;
+          workspaceMatches: number;
+          visibleTabMatches: number;
+          candidates: Record<string, unknown>[];
+          error?: string;
+        } = {
+          kind: mode.label, returned: 0, workspaceMatches: 0,
+          visibleTabMatches: 0, candidates: [],
+        };
+        try {
+          const seen = new Set<string>();
+          let cursor: string | null = null;
+          for (let page = 0; page < 3; page++) {
+            const response: ThreadListResponse = await this.client.request<ThreadListResponse>("thread/list", {
+              limit: 100, sortKey: "updated_at", sortDirection: "desc", archived: false,
+              ...(mode.restrictSource ? { sourceKinds: ["vscode"] } : {}),
+              ...(cursor ? { cursor } : {}),
+            }, 15_000);
+            if (!Array.isArray(response.data)) {
+              scan.error = "invalid_thread_list_response";
+              break;
+            }
+            scan.returned += response.data.length;
+            for (const thread of response.data) {
+              if (!thread || typeof thread.id !== "string" ||
+                  typeof thread.cwd !== "string" || !Number.isFinite(thread.updatedAt)) continue;
+              const workspaceMatch = isThreadCwdInsideWorkspace(thread.cwd, folders);
+              const windowVisible = tabs.has(thread.id.toLowerCase());
+              if (workspaceMatch) scan.workspaceMatches++;
+              if (windowVisible) scan.visibleTabMatches++;
+              if (!workspaceMatch && !windowVisible) continue;
+              if (scan.candidates.length >= 20) continue;
+              let latestStatus = "not_read";
+              let errorCode = "not_read";
+              try {
+                const turn = await this.latestTurn(thread.id);
+                latestStatus = typeof turn?.status === "string" ? turn.status : "missing";
+                errorCode = classifyLimitError(turn) ??
+                  (typeof turn?.error?.codexErrorInfo === "string"
+                    ? "other_structured_error" : turn?.error ? "other_error" : "none");
+              } catch {
+                latestStatus = "read_failed";
+                errorCode = "read_failed";
+              }
+              scan.candidates.push({
+                threadHash: hashId(thread.id),
+                workspaceMatch,
+                currentWindowEditorTab: windowVisible,
+                ageMinutes: Math.max(0, Math.round((Date.now() - thread.updatedAt * 1000) / 60_000)),
+                latestStatus,
+                structuredQuotaError: errorCode,
+              });
+            }
+            const next = response.nextCursor;
+            if (!next || seen.has(next)) break;
+            seen.add(next);
+            cursor = next;
+          }
+        } catch {
+          scan.error = "thread_list_read_failed";
+        }
+        report.scans.push(scan);
+      }
+      const scoped = report.scans[0] as { workspaceMatches?: number; visibleTabMatches?: number };
+      const broad = report.scans[1] as { workspaceMatches?: number; visibleTabMatches?: number };
+      // A thread from the same workspace is not necessarily from this window.
+      // Diagnose when this window's exact editor ID exists only outside the
+      // source-filtered list, even if that list contains unrelated cwd matches.
+      if ((scoped.visibleTabMatches ?? 0) === 0 && (broad.visibleTabMatches ?? 0) > 0) {
+        report.interpretation.push("The current window's Codex editor thread is visible without the vscode source filter but not with it. Confirm exact window ownership before any recovery dispatch.");
+      }
+      if (report.scans.every(scan => (scan as { workspaceMatches?: number }).workspaceMatches === 0)) {
+        report.interpretation.push("No recent App Server conversation matched an open workspace. Check Local/Remote extension hosts, session cwd and the Codex executable/account.");
+      }
+      if (tabs.size === 0) {
+        report.interpretation.push("No window-owned Codex custom-editor tab was found. Sidebar-only sessions cannot be enrolled in the new multi-session backlog without stronger owner evidence.");
+      }
+      const sampled = report.scans.flatMap(scan =>
+        (scan as { candidates?: Array<Record<string, unknown>> }).candidates ?? []);
+      if (report.quota.status === "blocked" &&
+          sampled.length && !sampled.some(item =>
+            item.structuredQuotaError === "usageLimitExceeded" ||
+            item.structuredQuotaError === "rateLimitExceeded" ||
+            item.latestStatus === "failed" || item.latestStatus === "interrupted")) {
+        report.interpretation.push(
+          "The sampled workspace turns are not failed/interrupted even though the quota is blocked. The official UI may have rejected the new prompt before a Codex turn was persisted; no input can safely be auto-replayed solely from a visible error banner.",
+        );
+      }
+    }
+    const doc = await vscode.workspace.openTextDocument({
+      language: "json", content: JSON.stringify(report, null, 2),
+    });
+    await vscode.window.showTextDocument(doc, { preview: true });
+  }
+
+  /**
+   * Inspect one user-identified Codex conversation and optional exact Turn.
+   * This is a read-only probe of the App Server in THIS extension host: never
+   * infer a recovery action or queue a prompt from an incoming UI placeholder.
+   */
+  async diagnoseExactThread(): Promise<void> {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const threadId = (await vscode.window.showInputBox({
+      title: "Codex Auto Resume: Inspect Exact Thread (Read-Only)",
+      prompt: "Paste the conversationId from the Codex Output log. Nothing will be submitted to Codex.",
+      placeHolder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      ignoreFocusOut: true,
+      validateInput: value => uuid.test(value.trim()) ? undefined : "Enter a complete Codex conversation UUID.",
+    }))?.trim().toLowerCase();
+    if (!threadId) return;
+    if (!uuid.test(threadId)) {
+      void vscode.window.showWarningMessage("The conversation ID is invalid. Nothing was sent.");
+      return;
+    }
+    const turnText = (await vscode.window.showInputBox({
+      title: "Codex Auto Resume: Optional Exact Turn",
+      prompt: "Paste its turnId, or leave blank to inspect only the newest Turn.",
+      placeHolder: "Optional xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      ignoreFocusOut: true,
+      validateInput: value => !value.trim() || uuid.test(value.trim())
+        ? undefined : "Enter a complete Turn UUID or leave blank.",
+    }));
+    if (turnText === undefined) return;
+    const requestedTurnId = turnText.trim().toLowerCase();
+    if (requestedTurnId && !uuid.test(requestedTurnId)) {
+      void vscode.window.showWarningMessage("The Turn ID is invalid. Nothing was sent.");
+      return;
+    }
+
+    const hash = (value: string): string => createHash("sha256").update(value).digest("hex").slice(0, 12);
+    const status = (value: unknown): string =>
+      ["completed", "failed", "interrupted", "inProgress", "pending", "notStarted"].includes(String(value))
+        ? String(value) : value === undefined ? "missing" : "other";
+    const summarizedTurn = (turn: CodexTurn | undefined): Record<string, unknown> => ({
+      found: Boolean(turn),
+      status: turn ? status(turn.status) : "missing",
+      quotaFailureReason: turn ? (classifyLimitError(turn) ?? "not_confirmed") : "not_found",
+      hasError: Boolean(turn?.error),
+    });
+    const record: {
+      note: string;
+      host: Record<string, unknown>;
+      identity: Record<string, unknown>;
+      exactTurn: Record<string, unknown>;
+      newestTurn: Record<string, unknown>;
+      quota: Record<string, unknown>;
+      interpretation: string[];
+    } = {
+      note: "READ-ONLY LOCAL DIAGNOSTIC. IDs are hashed; no prompts, answers, paths or raw errors are included. No recovery state or messages are changed.",
+      host: { remoteName: vscode.env?.remoteName ?? null, platform: process.platform },
+      identity: {
+        conversationHash: hash(threadId),
+        requestedTurnHash: requestedTurnId ? hash(requestedTurnId) : null,
+        currentWindowCodexEditorTab: this.windowConversationIds().has(threadId),
+        sameAsArmedRecovery: this.armed()?.threadId.toLowerCase() === threadId,
+        sameAsPendingQuotaCandidate: this.pendingQuotaCandidate()?.threadId.toLowerCase() === threadId,
+      },
+      exactTurn: { found: false, status: "not_checked" },
+      newestTurn: { found: false, status: "not_checked" },
+      quota: { status: "not_checked" },
+      interpretation: [],
+    };
+    try {
+      await this.ensureClient();
+      let cursor: string | null = null;
+      const seen = new Set<string>();
+      let newest: CodexTurn | undefined;
+      let requested: CodexTurn | undefined;
+      let inspected = 0;
+      for (let page = 0; page < (requestedTurnId ? 10 : 1); page++) {
+        const result: ThreadTurnsListResponse = await this.client!.request<ThreadTurnsListResponse>(
+          "thread/turns/list", { threadId, limit: 50, sortDirection: "desc", itemsView: "summary",
+            ...(cursor ? { cursor } : {}) }, 15_000,
+        );
+        if (!Array.isArray(result?.data)) {
+          record.interpretation.push("App Server returned an unsupported thread history shape.");
+          break;
+        }
+        inspected += result.data.length;
+        if (!newest) newest = result.data[0];
+        if (requestedTurnId) requested = result.data.find(item => item.id === requestedTurnId);
+        if (requested || !requestedTurnId) break;
+        const next = result.nextCursor;
+        if (!next || seen.has(next)) break;
+        cursor = next;
+        seen.add(next);
+      }
+      record.newestTurn = summarizedTurn(newest);
+      record.exactTurn = requestedTurnId ? summarizedTurn(requested) : { ...summarizedTurn(newest), sameAsNewest: true };
+      record.identity.inspectedTurns = inspected;
+      if (requestedTurnId && !requested) {
+        record.interpretation.push("The event Turn was not found in the bounded App Server history read. It may be a transient UI placeholder, unavailable in this host, or older than the scan window. This is not proof the original prompt failed.");
+      }
+      const relevant = requestedTurnId ? requested : newest;
+      if (relevant && classifyLimitError(relevant)) {
+        record.interpretation.push("The exact Codex Turn contains a structured quota failure; it is valid interruption evidence, but this diagnostic does NOT register a recovery target.");
+      } else if (relevant?.status === "completed") {
+        record.interpretation.push("This Turn is completed with no structured quota failure. A quota banner can be shown when a later prompt was rejected before a new persisted Turn existed.");
+      } else if (relevant && ["failed", "interrupted"].includes(relevant.status)) {
+        record.interpretation.push("The Turn is failed/interrupted, but no recognized structured quota error was returned. Do not infer quota as the sole cause from account status.");
+      }
+    } catch {
+      record.exactTurn = { found: false, status: "read_failed" };
+      record.interpretation.push("Exact conversation history could not be read through this extension host's App Server; verify Local/Remote host and Codex identity.");
+    }
+    try {
+      const response = await this.client!.request<RateLimitsReadResponse>(
+        "account/rateLimits/read", { excludeResetCreditDetails: true }, 15_000,
+      );
+      const classification = classifyQuotaAvailability(response);
+      record.quota = { status: classification.status, reason: classification.reason,
+        workspaceCreditsDepleted: [
+          "workspace_owner_credits_depleted", "workspace_member_credits_depleted",
+        ].includes(String(response.rateLimits?.rateLimitReachedType)) };
+    } catch {
+      record.quota = { status: "unavailable" };
+    }
+    const doc = await vscode.workspace.openTextDocument({ language: "json", content: JSON.stringify(record, null, 2) });
+    await vscode.window.showTextDocument(doc, { preview: true });
   }
 
   async resumeNow(): Promise<void> {
@@ -304,6 +628,35 @@ export class AutoResumeController implements vscode.Disposable {
     return this.context.workspaceState.get<ArmedResume>(STATE_KEY);
   }
 
+  private backlog(): ArmedResume[] {
+    return readRecoveryBacklog(this.context.workspaceState.get<unknown>(RECOVERY_BACKLOG_KEY));
+  }
+
+  private async saveBacklog(backlog: ArmedResume[]): Promise<void> {
+    await this.context.workspaceState.update(RECOVERY_BACKLOG_KEY, backlog.length ? backlog : undefined);
+    await this.syncRecoveryPriority();
+  }
+
+  /**
+   * Restrict new multi-session candidates to actual Codex editor tabs observed
+   * in this VS Code window. A matching cwd alone is never ownership evidence.
+   * An unopened/closed thread remains persisted but cannot be auto-dispatched.
+   */
+  private windowConversationIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const group of vscode.window.tabGroups?.all ?? []) {
+      for (const tab of group.tabs) {
+        const input = tab.input;
+        if (!(input instanceof vscode.TabInputCustom)) continue;
+        if (input.viewType !== "chatgpt.conversationEditor" ||
+            input.uri.scheme !== "openai-codex" || input.uri.authority !== "route") continue;
+        const match = /^\/(?:local|remote)\/([0-9a-f-]{36})$/i.exec(input.uri.path);
+        if (match) ids.add(match[1].toLowerCase());
+      }
+    }
+    return ids;
+  }
+
   private pendingQuotaCandidate(): PendingQuotaInterruption | undefined {
     return this.context.workspaceState.get<PendingQuotaInterruption>(PENDING_QUOTA_CANDIDATE_KEY);
   }
@@ -325,7 +678,9 @@ export class AutoResumeController implements vscode.Disposable {
     const pending = this.pendingQuotaCandidate();
     const registration = !this.enabled() || this.disposed ? undefined
       : armed ? { phase: armed.resumeTurnId || armed.dispatchPending ? "verifying" as const : "armed" as const, threadId: armed.threadId }
-      : pending ? { phase: "pending" as const, threadId: pending.threadId } : undefined;
+      : pending ? { phase: "pending" as const, threadId: pending.threadId }
+      : this.backlog()[0] ? { phase: "armed" as const, threadId: this.backlog()[0].threadId }
+      : undefined;
     try {
       await this.recovery.set(registration);
       if (this.coordinationUnavailable) this.output.appendLine("[auto-resume] same-host recovery registration recovered");
@@ -416,7 +771,20 @@ export class AutoResumeController implements vscode.Disposable {
   /** Opens a local untitled diagnostic, never logs prompt text or executes a turn. */
   async inspectRecoveryInput(): Promise<void> {
     await this.ensureClient();
-    const armed = this.armed();
+    const active = this.armed();
+    const backlog = this.backlog();
+    const ids = this.windowConversationIds();
+    const choices = [...(active ? [active] : []), ...backlog]
+      .filter(item => ids.has(item.threadId.toLowerCase()));
+    let armed = active;
+    if (choices.length > 1 || (!active && choices.length === 1)) {
+      const picked = await vscode.window.showQuickPick(choices.map(item => ({
+        label: item.threadId,
+        description: item.threadId === active?.threadId ? "Current recovery" : "Saved in backlog",
+      })), { placeHolder: "Inspect input from which saved Codex conversation?" });
+      if (!picked) return;
+      armed = choices.find(item => item.threadId === picked.label);
+    }
     const threadId = armed?.threadId ?? (await this.findMostRecentThread())?.id;
     if (!threadId) {
       void vscode.window.showWarningMessage("No workspace work thread is available for input inspection.");
@@ -438,7 +806,8 @@ export class AutoResumeController implements vscode.Disposable {
       autoResumeExtensionVersion: this.context.extension?.packageJSON?.version ?? "unknown",
       ...recoveryDiagnostic(plan),
       persistedRecovery: armed ? {
-        phase: armed.dispatchPending ? "dispatch_pending" : armed.resumeTurnId ? "verifying" : armed.recoveryPlan ? "armed" : "classifying",
+        phase: active?.threadId !== armed.threadId ? "queued"
+          : armed.dispatchPending ? "dispatch_pending" : armed.resumeTurnId ? "verifying" : armed.recoveryPlan ? "armed" : "classifying",
         interruptedTurnId: armed.interruptedTurnId,
         action: armed.recoveryPlan?.action ?? null,
         reason: armed.recoveryPlan?.reason ?? null,
@@ -513,6 +882,43 @@ export class AutoResumeController implements vscode.Disposable {
     await vscode.window.showTextDocument(doc, { preview: true });
   }
 
+  /**
+   * The review target is chosen explicitly from the window's saved backlog.
+   * Never switch away from a dispatch that could already have been delivered.
+   */
+  private async selectRecoveryForReview(): Promise<boolean> {
+    const backlog = this.backlog();
+    if (!backlog.length) return true;
+    const current = this.armed();
+    if (current?.dispatchPending || current?.resumeTurnId) {
+      void vscode.window.showWarningMessage("An existing recovery dispatch is being verified; selection is blocked until its outcome is known.");
+      return false;
+    }
+    const ids = this.windowConversationIds();
+    const choices = [...(current ? [current] : []), ...backlog]
+      .filter(item => ids.has(item.threadId.toLowerCase()));
+    if (!choices.length) {
+      void vscode.window.showWarningMessage("No saved recovery conversation is open in this VS Code window.");
+      return false;
+    }
+    const selected = await vscode.window.showQuickPick(choices.map(item => ({
+      label: item.threadId,
+      description: item.recoveryPlan?.action === "needs_review" ? "Review required" : "Recovery queued",
+      threadId: item.threadId,
+    })), { placeHolder: "Select a conversation in this window to review its saved input" });
+    if (!selected) return false;
+    if (current?.threadId === selected.threadId) return true;
+    const target = backlog.find(item => item.threadId === selected.threadId);
+    if (!target) return false;
+    // Save the outgoing active record in the backlog before replacing it.
+    const nextBacklog = [...backlog.filter(item => item.threadId !== target.threadId &&
+      item.threadId !== current?.threadId), ...(current ? [current] : [])];
+    await this.saveBacklog(nextBacklog);
+    await this.saveArmed(target);
+    this.availabilityCandidate = undefined;
+    return true;
+  }
+
   /** An explicit per-input choice queues an action; it never bypasses quota guards. */
   async reviewRecoveryInput(): Promise<void> {
     if (this.reviewingInput) return;
@@ -523,6 +929,7 @@ export class AutoResumeController implements vscode.Disposable {
     this.reviewingInput = true;
     try {
       await this.ensureClient();
+      if (!await this.selectRecoveryForReview()) return;
       const armed = this.armed();
       if (!armed) {
         void vscode.window.showWarningMessage("There is no Armed recovery target in this extension host. Inspect the current conversation or confirm the Local/Remote host.");
@@ -552,17 +959,42 @@ export class AutoResumeController implements vscode.Disposable {
         historical?.complete === true && plan.inputs.length === 1 && historical.turns.length >= 1 &&
         historical.turns[0].id === plan.sourceTurnId &&
         canManuallyConfirmQuestionContinuation(historical.turns[0]);
-      if (!manualQuestionContinue &&
+      const manualLateAnswer = !plan.stale && plan.reason === "multiple_unresolved_inputs" &&
+        plan.candidate === "replay_input" && Boolean(plan.manualReplayInput) &&
+        !plan.manualReplyKind && replayText(plan) !== undefined;
+      const manualStructuredAnswer = !plan.stale && plan.reason === "multiple_unresolved_inputs" &&
+        plan.candidate === "replay_input" && plan.manualReplyKind === "structured_question_reply" &&
+        Boolean(plan.manualReplayInput) && replayText(plan) !== undefined;
+      if (!manualQuestionContinue && !manualLateAnswer && !manualStructuredAnswer &&
           (plan.stale || plan.candidate !== "replay_input" || replayText(plan) === undefined)) {
         const detail = plan.reason.startsWith("attachment_")
           ? `TXT attachment is blocked by ${plan.reason}; fix or restore the original file in the same host. Review cannot waive attachment integrity checks.`
           : "The input is incomplete, unsupported, multiple, oversized, or has an unresolved interaction that cannot safely be replayed.";
-        void vscode.window.showWarningMessage(`${detail} Nothing was sent.`);
+        if (plan.reason === "multiple_unresolved_inputs") {
+          const inspect = "Inspect question/approval evidence (read-only)";
+          const selected = await vscode.window.showWarningMessage(
+            `Recovery has ${plan.inputs.length} saved user inputs, but this history does not prove a safe final reply to resume. ${detail} No recovery was sent. You can inspect the exact recorded interaction evidence without changing recovery state.`,
+            { modal: true }, inspect,
+          );
+          if (selected === inspect) await this.inspectRecoveryInteractions();
+        } else {
+          void vscode.window.showWarningMessage(`${detail} Nothing was sent.`);
+        }
         return;
       }
       const replay = "Replay saved input after quota recovery";
+      const replayLatest = "Replay latest saved answer only after quota recovery";
+      const continueFromStructured = "Continue using last saved question answer after quota recovery";
       const proceed = "Continue existing work after quota recovery";
-      const choice = manualQuestionContinue
+      const choice = manualStructuredAnswer
+        ? await vscode.window.showWarningMessage(
+          "The quota-failed turn contains several native question replies. Prior work exists, but the final answer has no recorded Codex acknowledgement. The official UI IPC cannot resend a native question-reply envelope as such. After reviewing the saved inputs and confirming the last answer, choose Continue to send a NEW ordinary-text continuation explicitly quoting only the final question and answer; earlier work and answers will not be replayed. No new tool permissions or broader authorization are granted.",
+          { modal: true }, continueFromStructured)
+        : manualLateAnswer
+        ? await vscode.window.showWarningMessage(
+          "The original task already performed work, but the final ordinary-text reply has no confirmed execution afterwards. After inspecting this conversation, you may replay ONLY that final reply. The original task and earlier messages will not be resent. This does not grant a permission or resolve a pending approval.",
+          { modal: true }, replayLatest)
+        : manualQuestionContinue
         ? await vscode.window.showWarningMessage(
           "History contains an ambiguous question, but this turn has executed work. Only if you personally verified that no answer or approval is still pending, choose Continue. This sends the configured continuation prompt once after quota recovery and grants NO new permissions; the original prompt and its attachments will NOT be resent.",
           { modal: true }, proceed)
@@ -570,7 +1002,8 @@ export class AutoResumeController implements vscode.Disposable {
           "Full history contains one user input but cannot prove whether it started. Choose only after checking the original conversation. This queues one exact action, not additional execution permissions.",
           { modal: true }, replay, proceed,
         );
-      if (choice !== replay && choice !== proceed) return;
+      if (choice !== replay && choice !== replayLatest &&
+          choice !== continueFromStructured && choice !== proceed) return;
       const fresh = await readRecoveryHistory(this.client!, armed.threadId);
       const check = await materializePastedTxt(classifyRecoveryHistory(fresh, { nowMs: Date.now(), previous: plan,
         replaySourceTurnId: fresh.turns[0]?.id === prepared?.replayTurnId ? prepared?.replaySourceTurnId : undefined,
@@ -581,22 +1014,37 @@ export class AutoResumeController implements vscode.Disposable {
         fresh.turns[0].id === plan.sourceTurnId &&
         canManuallyConfirmQuestionContinuation(fresh.turns[0]) &&
         check.reason === "unanswered_question_or_approval";
-      const revalidatedReplay = !manualQuestionContinue &&
+      const revalidatedStructuredAnswer = manualStructuredAnswer && choice === continueFromStructured &&
+        !check.stale && check.reason === "multiple_unresolved_inputs" &&
+        check.candidate === "replay_input" && check.manualReplyKind === "structured_question_reply" &&
+        replayText(check) === replayText(plan) && replayText(check) !== undefined &&
+        check.manualReplayInput?.turnId === plan.manualReplayInput?.turnId &&
+        check.manualReplayInput?.messageId === plan.manualReplayInput?.messageId;
+      const revalidatedLateAnswer = manualLateAnswer && choice === replayLatest &&
+        !check.stale && check.reason === "multiple_unresolved_inputs" &&
+        check.candidate === "replay_input" && replayText(check) !== undefined &&
+        check.manualReplayInput?.turnId === plan.manualReplayInput?.turnId &&
+        check.manualReplayInput?.messageId === plan.manualReplayInput?.messageId;
+      const revalidatedReplay = !manualQuestionContinue && !manualLateAnswer &&
         check.candidate === "replay_input" && !check.stale && replayText(check) !== undefined;
       if (!this.canMonitor() || !current || current.armedAtMs !== armed.armedAtMs ||
           current.threadId !== armed.threadId || current.dispatchPending || current.resumeTurnId ||
           !fresh.complete || check.fingerprint !== plan.fingerprint ||
-          !(revalidatedManualQuestion || revalidatedReplay) ||
+          !(revalidatedManualQuestion || revalidatedLateAnswer ||
+            revalidatedStructuredAnswer || revalidatedReplay) ||
           current.recoveryPlan?.fingerprint !== plan.fingerprint) {
         void vscode.window.showWarningMessage("Recovery changed while the dialog was open. The stale choice was not applied; review the latest input.");
         return;
       }
-      const action = choice === replay ? "replay_input" as const : "continue" as const;
+      const action = choice === replay || choice === replayLatest ||
+        choice === continueFromStructured ? "replay_input" as const : "continue" as const;
       const approved: RecoveryPlan = {
         ...check, action,
         ...(manualQuestionContinue ? { candidate: "continue" as const } : {}),
         reason: manualQuestionContinue
-          ? "user_confirmed_ambiguous_question_continue" : "user_confirmed_action",
+          ? "user_confirmed_ambiguous_question_continue" : revalidatedLateAnswer
+          ? "user_confirmed_latest_answer_replay" : revalidatedStructuredAnswer
+          ? "user_confirmed_last_structured_answer_continue" : "user_confirmed_action",
         approval: { action, fingerprint: check.fingerprint },
       };
       await this.saveArmed({ ...current, recoveryPlan: approved, replayAttempts: 0 });
@@ -639,7 +1087,32 @@ export class AutoResumeController implements vscode.Disposable {
       const rateRead = await this.tryReadRateLimits();
       const limits = rateRead.limits;
       if (!this.canMonitor()) return;
-      const armed = this.armed();
+      let armed = this.armed();
+      // A review-blocked conversation must not starve other safe conversations.
+      // The old active record remains byte-for-byte intact in the backlog.
+      const ids = this.windowConversationIds();
+      const backlog = this.backlog();
+      if (!armed || (armed.recoveryPlan?.action === "needs_review" &&
+                     !armed.dispatchPending && !armed.resumeTurnId)) {
+        const eligible = backlog.filter(item => ids.has(item.threadId.toLowerCase()) &&
+          item.recoveryPlan?.action !== "needs_review");
+        const chosen = selectNextRecovery(eligible, true);
+        if (chosen) {
+          const nextBacklog = backlog.filter(item => item.threadId !== chosen.selected.threadId &&
+            item.threadId !== armed?.threadId);
+          if (armed) nextBacklog.push(armed);
+          if (armed) {
+            await this.saveBacklog(nextBacklog);
+            await this.saveArmed(chosen.selected);
+          } else {
+            // Write the new active record before removing the durable backlog
+            // copy. A crash may leave a duplicate, but can never lose the job.
+            await this.saveArmed(chosen.selected);
+            await this.saveBacklog(nextBacklog);
+          }
+          armed = chosen.selected;
+        }
+      }
       const pendingIdentity = this.pendingQuotaCandidate();
       const armedIsPrimer = armed && await this.isRecordedPrimerThread(armed.threadId);
       const pendingIsPrimer = pendingIdentity && await this.isRecordedPrimerThread(pendingIdentity.threadId);
@@ -649,6 +1122,17 @@ export class AutoResumeController implements vscode.Disposable {
         if (armedIsPrimer) await this.saveArmed(undefined);
         if (pendingIsPrimer) await this.savePendingQuotaCandidate(undefined);
         this.output.appendLine("[auto-resume] cleared a stored Primer recovery target; dedicated Primer threads are excluded from work recovery");
+        return;
+      }
+
+      if (armed && this.backlog().length && vscode.window.tabGroups &&
+          !ids.has(armed.threadId.toLowerCase())) {
+        // The shared workspace store can be read by another VS Code window
+        // opening the same folder. Never dispatch another window's saved work.
+        // Its owner window can still progress it. We may discover this window's
+        // other custom-editor conversations into the backlog.
+        this.availabilityCandidate = undefined;
+        await this.collectWindowRecoveries(limits);
         return;
       }
 
@@ -697,6 +1181,7 @@ export class AutoResumeController implements vscode.Disposable {
           }
         }
       }
+      if (this.canMonitor()) await this.collectWindowRecoveries(limits);
     } catch (error) {
       this.availabilityCandidate = undefined;
       this.output.appendLine(`[auto-resume] tick failed: ${(error as Error).message}`);
@@ -855,6 +1340,10 @@ export class AutoResumeController implements vscode.Disposable {
   private async tryAutomaticResume(armed: ArmedResume): Promise<void> {
     const current = this.armed();
     if (!this.canMonitor() || !current || current.dispatchPending || current.resumeTurnId) return;
+    if (current.windowScoped && !this.windowConversationIds().has(current.threadId.toLowerCase())) {
+      this.output.appendLine(`[auto-resume] window-scoped thread ${current.threadId} is no longer open here; preserving recovery without IPC`);
+      return;
+    }
     if (this.inputRecoveryEnabled() && (!current.recoveryPlan || current.recoveryPlan.action === "needs_review")) return;
     const savedInput = current.recoveryPlan?.action === "replay_input" ? replayText(current.recoveryPlan) : undefined;
     if (current.recoveryPlan?.action === "replay_input" && savedInput === undefined) return;
@@ -923,6 +1412,9 @@ export class AutoResumeController implements vscode.Disposable {
         // we are finding the official writer. Recheck immediately before IPC
         // startTurn instead of relying on the earlier dispatch snapshot.
         const currentAttempt = this.armed();
+        if (currentAttempt?.windowScoped && !this.windowConversationIds().has(armed.threadId.toLowerCase())) {
+          throw new WorkContinuationPreflightCancelled("window-scoped conversation moved or closed before delivery");
+        }
         if (!this.canMonitor() || !currentAttempt?.dispatchPending ||
             currentAttempt.threadId !== armed.threadId ||
             currentAttempt.dispatchPending.hostClaimToken !== claim.record.token ||
@@ -995,9 +1487,23 @@ export class AutoResumeController implements vscode.Disposable {
     if (!sent) {
       await claim.releaseUnsent();
       if (this.canMonitor() && this.armed()?.dispatchPending?.sentAtMs === pending.dispatchPending!.sentAtMs) {
-        await this.saveArmed({ ...pending, replayAttempts: armed.replayAttempts, dispatchPending: undefined });
+        const deferred: ArmedResume = { ...pending, replayAttempts: armed.replayAttempts, dispatchPending: undefined };
+        const ids = this.windowConversationIds();
+        const backlog = this.backlog();
+        const anotherReady = backlog.some(item => ids.has(item.threadId.toLowerCase()) &&
+          item.threadId !== armed.threadId && item.recoveryPlan?.action !== "needs_review" &&
+          !item.dispatchPending && !item.resumeTurnId);
+        if (anotherReady) {
+          // Definitive no-owner is known-unsent. Yield so another independent
+          // conversation can proceed, but do not drop the original recovery.
+          await this.saveBacklog([...backlog.filter(item => item.threadId !== armed.threadId), deferred]);
+          await this.saveArmed(undefined);
+          this.output.appendLine(`[auto-resume] no UI owner for ${armed.threadId}; deferred it behind another window-visible recovery`);
+        } else {
+          await this.saveArmed(deferred);
+          this.output.appendLine(`[auto-resume] no active UI owner for ${armed.threadId}; keeping thread armed for a confirmed retry`);
+        }
       }
-      this.output.appendLine(`[auto-resume] no active UI owner for ${armed.threadId}; keeping thread armed for a confirmed retry`);
       return;
     }
     const resumedTurn = await this.waitForNewTurn(armed.threadId, before.id, "auto-resume", pending.dispatchPending!.sentAtMs);
@@ -1324,12 +1830,96 @@ export class AutoResumeController implements vscode.Disposable {
     return true;
   }
 
+  /**
+   * Window-local discovery only. A thread/list result is a workspace match,
+   * never enough by itself to identify the window that owns the conversation.
+   */
+  private async collectWindowRecoveries(limits: RateLimitSnapshot | null): Promise<void> {
+    const windowIds = this.windowConversationIds();
+    if (!windowIds.size) return;
+    const folders = vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) ?? [];
+    if (!folders.length) return;
+    const queued = new Set(this.backlog().map(item => item.threadId.toLowerCase()));
+    if (this.armed()) queued.add(this.armed()!.threadId.toLowerCase());
+    const primerState = this.context.globalState.get<QuotaPrimerState>(QUOTA_PRIMER_STATE_KEY);
+    const journalRead = await readQuotaPrimerSendJournal(this.context.globalStorageUri.fsPath);
+    const journal = journalRead.status === "ready" ? journalRead.journal : undefined;
+    const primerIds = [...(journal?.knownPrimerThreadIds ?? []), ...(journal?.threadId ? [journal.threadId] : [])];
+    const recentCutoff = Date.now() - Math.max(5,
+      vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 480)) * 60_000;
+    // Only when a current-window editor gives exact ID evidence may we
+    // widen the source filter. Some Remote SSH Codex clients do not report
+    // their conversations as sourceKinds=["vscode"].
+    for (const filterSource of [true, false]) {
+      if ([...windowIds].every(id => queued.has(id))) break;
+      let cursor: string | null = null;
+      const seen = new Set<string>();
+      for (let page = 0; page < 20; page++) {
+        let response: ThreadListResponse;
+        try {
+          response = await this.client!.request<ThreadListResponse>("thread/list", {
+            limit: 100, sortKey: "updated_at", sortDirection: "desc",
+            ...(filterSource ? { sourceKinds: ["vscode"] } : {}),
+            archived: false, ...(cursor ? { cursor } : {}),
+          });
+        } catch (error) {
+          if (!filterSource) throw error;
+          this.output.appendLine("[auto-resume] scoped thread listing unavailable; checking exact current-window tab IDs through an unfiltered source listing");
+          break;
+        }
+      if (!Array.isArray(response?.data)) return;
+      for (const thread of response.data) {
+        if (!thread || !windowIds.has(thread.id.toLowerCase()) ||
+            queued.has(thread.id.toLowerCase()) ||
+            !isThreadCwdInsideWorkspace(thread.cwd, folders) ||
+            !Number.isFinite(thread.updatedAt) ||
+            thread.updatedAt * 1000 < recentCutoff ||
+            isPrimerThread(thread, primerState, primerIds)) continue;
+        const latest = await this.latestTurn(thread.id);
+        const reason = classifyLimitError(latest);
+        if (!latest || !reason || !this.canMonitor()) continue;
+        const record: ArmedResume = {
+          threadId: thread.id, cwd: thread.cwd, armedAtMs: Date.now(), windowScoped: true,
+          resetAtMs: this.computeResetAt(limits) ?? 0,
+          interruptedTurnId: latest.id, reason,
+        };
+        // This classification is persisted independently for each source;
+        // unknown input evidence must remain needs_review.
+        const history = await readRecoveryHistory(this.client!, thread.id);
+        record.recoveryPlan = await materializePastedTxt(classifyRecoveryHistory(history, {
+          nowMs: Date.now(), policy: this.userOnlyPolicy(),
+        }));
+        if (!this.canMonitor()) return;
+        const current = this.backlog();
+        const next = enqueueRecovery(current, record, this.armed()?.threadId);
+        if (next.length !== current.length) {
+          await this.saveBacklog(next);
+          queued.add(thread.id.toLowerCase());
+          this.output.appendLine(`[auto-resume] saved window-visible quota-failed thread ${thread.id}; action=${record.recoveryPlan.action}`);
+        }
+      }
+      const nextCursor: string | null = response.nextCursor;
+        if (!nextCursor || seen.has(nextCursor)) break;
+        cursor = nextCursor;
+        seen.add(nextCursor);
+      }
+    }
+  }
+
   private async findInterruptedThread(
     limits: RateLimitSnapshot | null,
     rateLimitsAvailable: boolean,
   ): Promise<{ thread: CodexThread; turn: CodexTurn; reason: ArmedResume["reason"] } | undefined> {
     const thread = await this.findMostRecentThread();
     if (!thread) return undefined;
+    // Existing single-target monitoring remains compatible with official
+    // sidebar-only Codex sessions (which may not expose any custom editor tab).
+    // When THIS window does have Codex editor tabs, never select a different
+    // window's recent thread merely because it shares the workspace cwd.
+    const localTabs = this.windowConversationIds();
+    if (vscode.window.tabGroups && localTabs.size > 0 && !localTabs.has(thread.id.toLowerCase())) {
+      return undefined;
+    }
 
     const ageMinutes = (Date.now() - thread.updatedAt * 1000) / 60_000;
     const recentMinutes = Math.max(
@@ -1429,34 +2019,59 @@ export class AutoResumeController implements vscode.Disposable {
       ...(journal?.pending ? [journal.pending.threadId] : [])];
     const recentMinutes = Math.max(5, vscode.workspace.getConfiguration("codexAutoResume").get<number>("recentThreadMinutes", 480));
     const recentCutoffMs = Date.now() - recentMinutes * 60_000;
+    // A cwd match establishes workspace membership, NOT window ownership.
+    // If this window has explicit Codex editor tabs, require their exact IDs
+    // during selection so a newer foreign thread never hides local work.
+    const visibleIds = this.windowConversationIds();
+    const modes = [
+      { exact: true, filterSource: true },
+      { exact: false, filterSource: true },
+      ...(visibleIds.size ? [{ exact: false, filterSource: false }] : []),
+    ];
+    let best: CodexThread | undefined;
+    let bestMode: "workspace-root" | "workspace-descendant" | "window-visible-other-source" | undefined;
     let staleExact: CodexThread | undefined;
-    for (const exact of [true, false]) {
+    for (const { exact, filterSource } of modes) {
       let cursor: string | null = null;
       const seen = new Set<string>();
-      // Bound work even if an old server returns a nonterminating cursor chain.
+      // The server sorts by updated_at. Find the freshest eligible entry from
+      // EACH source/query mode, then compare across modes. Previously the first
+      // nonstale exact-cwd match returned immediately and could hide a much
+      // newer quota-failed descendant of another root in a multi-root workspace.
       for (let page = 0; page < 20; page += 1) {
-        const response: ThreadListResponse = await this.client!.request<ThreadListResponse>("thread/list", {
-          limit: exact ? 20 : 100, sortKey: "updated_at", sortDirection: "desc",
-          sourceKinds: ["vscode"], ...(exact ? { cwd: folders } : {}), archived: false,
-          ...(cursor ? { cursor } : {}),
-        });
+        let response: ThreadListResponse;
+        try {
+          response = await this.client!.request<ThreadListResponse>("thread/list", {
+            limit: exact ? 20 : 100, sortKey: "updated_at", sortDirection: "desc",
+            ...(filterSource ? { sourceKinds: ["vscode"] } : {}),
+            ...(exact ? { cwd: folders } : {}), archived: false,
+            ...(cursor ? { cursor } : {}),
+          });
+        } catch (error) {
+          if (!filterSource || visibleIds.size === 0) throw error;
+          this.output.appendLine("[auto-resume] scoped thread listing failed; falling back only for verified current-window tab IDs");
+          break;
+        }
         if (!Array.isArray(response?.data)) return undefined;
+        let candidate: CodexThread | undefined;
         for (const thread of response.data) {
           if (!thread || typeof thread.id !== "string" || typeof thread.cwd !== "string" ||
               !Number.isFinite(thread.updatedAt) || isPrimerThread(thread, primerState, hostIds) ||
-              !isThreadCwdInsideWorkspace(thread.cwd, folders)) continue;
+              !isThreadCwdInsideWorkspace(thread.cwd, folders) ||
+              (visibleIds.size > 0 && !visibleIds.has(thread.id.toLowerCase()))) continue;
           if (thread.updatedAt * 1000 < recentCutoffMs) {
-            if (exact && !staleExact) staleExact = thread;
+            if (exact && (!staleExact || thread.updatedAt > staleExact.updatedAt)) staleExact = thread;
             continue;
           }
-          if (!exact) {
-            const key = `workspace-fallback:${thread.id}:${thread.cwd}`;
-            if (key !== this.lastThreadSelectionDiagnostic) {
-              this.output.appendLine(`[auto-resume] selected recent workspace-descendant thread ${thread.id} after exact lookup`);
-              this.lastThreadSelectionDiagnostic = key;
-            }
-          } else this.lastThreadSelectionDiagnostic = undefined;
-          return thread;
+          if (!candidate || thread.updatedAt > candidate.updatedAt) candidate = thread;
+        }
+        if (candidate) {
+          if (!best || candidate.updatedAt > best.updatedAt) {
+            best = candidate;
+            bestMode = exact ? "workspace-root" : filterSource
+              ? "workspace-descendant" : "window-visible-other-source";
+          }
+          break;
         }
         const next = response.nextCursor;
         if (!next || seen.has(next)) break;
@@ -1464,7 +2079,17 @@ export class AutoResumeController implements vscode.Disposable {
         cursor = next;
       }
     }
-    // Preserve the previous stale-thread diagnostic path; it never arms stale work.
+    if (best) {
+      const diagnosticKey = `selected:${best.id}:${bestMode}`;
+      if (this.lastThreadSelectionDiagnostic !== diagnosticKey) {
+        this.output.appendLine(
+          `[auto-resume] selected newest eligible ${bestMode} thread ${best.id} across workspace listing modes`,
+        );
+        this.lastThreadSelectionDiagnostic = diagnosticKey;
+      }
+      return best;
+    }
+    // Stale exact threads may be displayed in diagnostics, never armed.
     return staleExact;
   }
 
@@ -1508,6 +2133,16 @@ export class AutoResumeController implements vscode.Disposable {
       return;
     }
     const armed = this.armed();
+    let queued: number;
+    try {
+      queued = this.backlog().length;
+    } catch {
+      // Damaged state must not crash extension activation or be silently
+      // discarded. Show a warning and leave the saved bytes untouched.
+      this.statusBar.text = "$(warning) Codex Resume: Queue Invalid";
+      this.statusBar.tooltip = "Saved recovery backlog is invalid; no automatic recovery will run. Inspect Output.";
+      return;
+    }
     if (!armed) {
       const pending = this.pendingQuotaCandidate();
       if (pending) {
@@ -1515,12 +2150,12 @@ export class AutoResumeController implements vscode.Disposable {
         this.statusBar.tooltip = `Interrupted turn ${pending.turnId} is waiting for account quota confirmation`;
         return;
       }
-      this.statusBar.text = "$(eye) Codex Resume: Monitoring";
-      this.statusBar.tooltip = "Watching for a Codex usage-limit interruption";
+      this.statusBar.text = queued ? `$(list-ordered) Codex Resume: ${queued} queued` : "$(eye) Codex Resume: Monitoring";
+      this.statusBar.tooltip = queued ? `${queued} window-visible interrupted conversations saved` : "Watching for a Codex usage-limit interruption";
       return;
     }
     if (armed.resumeTurnId || armed.dispatchPending) {
-      this.statusBar.text = "$(sync) Codex Resume: Verifying";
+      this.statusBar.text = queued ? `$(sync) Codex Resume: Verifying (+${queued})` : "$(sync) Codex Resume: Verifying";
       this.statusBar.tooltip = `Continuation ${armed.resumeTurnId ?? "dispatch pending"} is being verified; no duplicate continuation will be sent`;
       return;
     }
@@ -1531,17 +2166,17 @@ export class AutoResumeController implements vscode.Disposable {
     }
     if (this.inputRecoveryEnabled() && armed.recoveryPlan?.action === "needs_review") {
       const blocked = armed.recoveryPlan.reason.startsWith("attachment_");
-      this.statusBar.text = blocked ? "$(warning) Codex Resume: TXT Blocked" : "$(warning) Codex Resume: Review Input";
+      this.statusBar.text = queued ? `$(warning) Codex Resume: Review (+${queued})` : blocked ? "$(warning) Codex Resume: TXT Blocked" : "$(warning) Codex Resume: Review Input";
       this.statusBar.tooltip = blocked
         ? `TXT attachment could not be safely replayed (${armed.recoveryPlan.reason}). Click to inspect; Review cannot bypass integrity checks.`
         : `Recovery is retained, not sent: ${armed.recoveryPlan.reason}. Click to review.`;
       this.statusBar.command = blocked ? "codexAutoResume.inspectRecoveryInput" : "codexAutoResume.reviewRecoveryInput";
       return;
     }
-    this.statusBar.text = this.availabilityCandidate
+    this.statusBar.text = queued ? `$(clock) Codex Resume: Armed (+${queued})` : this.availabilityCandidate
       ? "$(sync) Codex Resume: Confirming availability"
       : "$(clock) Codex Resume: Armed (awaiting availability)";
-    this.statusBar.tooltip = `Thread ${armed.threadId}; expected backend reset ${new Date(armed.resetAtMs).toLocaleString()}; confirmed quota availability can resume earlier`;
+    this.statusBar.tooltip = `Thread ${armed.threadId}; backend reset ${armed.resetAtMs > 0 ? new Date(armed.resetAtMs).toLocaleString() : "not supplied"}; sending requires confirmed quota availability`;
 
   }
 }
