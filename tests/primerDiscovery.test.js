@@ -40,17 +40,18 @@ async function discovery(t, options = {}) {
   return h;
 }
 
-test("exact discovery skips current, historical, and metadata Primer threads sharing the work cwd", async (t) => {
+test("combined discovery skips current, historical, and metadata Primer threads sharing the work cwd", async (t) => {
   const work = thread("real-work", { name: "Implement Quota Primer integration" });
   const h = await discovery(t, {
     state: { threadId: "current-primer", knownPrimerThreadIds: ["previous-primer"] },
     exact: { first: { data: [thread("current-primer"), thread("previous-primer"), thread("unrecorded-primer", { source: { custom: PRIMER_THREAD_SOURCE } }), work], nextCursor: null } },
   });
   assert.equal((await h.controller.findMostRecentThread()).id, work.id);
-  assert.ok(h.requests.every((request) => request.params.cwd));
+  assert.ok(h.requests.some((request) => request.params.cwd));
+  assert.ok(h.requests.some((request) => !request.params.cwd), "must compare exact and descendant candidates");
 });
 
-test("exact discovery searches later pages after filtering Primer and unrelated workspace entries", async (t) => {
+test("combined discovery searches exact later pages after filtering Primer and unrelated workspace entries", async (t) => {
   const h = await discovery(t, {
     state: { knownPrimerThreadIds: ["previous-primer"] },
     exact: {
@@ -60,7 +61,8 @@ test("exact discovery searches later pages after filtering Primer and unrelated 
   });
   assert.equal((await h.controller.findMostRecentThread()).id, "real-work");
   assert.ok(h.requests.some((request) => request.params.cursor === "exact-page-2"));
-  assert.ok(h.requests.every((request) => request.params.limit === 20));
+  assert.ok(h.requests.filter((request) => request.params.cwd).every((request) => request.params.limit === 20));
+  assert.ok(h.requests.filter((request) => !request.params.cwd).every((request) => request.params.limit === 100));
 });
 
 test("broad discovery paginates, checks workspace descendants, and excludes historical and metadata Primers", async (t) => {
