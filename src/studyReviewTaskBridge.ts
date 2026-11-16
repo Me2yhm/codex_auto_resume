@@ -214,12 +214,27 @@ export class StudyReviewTaskBridge implements vscode.Disposable {
       writeStatus(resultFile, selectedResult);
 
       const prompt = buildStudyReviewPrompt(request);
+      // App Server may emit turn/completed before turn/start resolves.
+      // Capture that notification before submitting to avoid a lost result.
+      let earlyCompletion: { threadId?: string; turn?: { id?: string; status?: string } } | null = null;
+      const onEarlyCompletion = (method: string, params: unknown): void => {
+        if (method === "turn/completed") {
+          const evt = params as { threadId?: string; turn?: { id?: string; status?: string } };
+          if (evt?.threadId === threadId) earlyCompletion = evt;
+        }
+      };
+      client.on("notification", onEarlyCompletion);
       turnAttempted = true;
-      const turn = await client.request<TurnStartResponse>("turn/start", {
-        threadId,
-        input: [{ type: "text", text: prompt, text_elements: [] }],
-        model: selected.model,
-      }, 30_000);
+      let turn: TurnStartResponse;
+      try {
+        turn = await client.request<TurnStartResponse>("turn/start", {
+          threadId,
+          input: [{ type: "text", text: prompt, text_elements: [] }],
+          model: selected.model,
+        }, 30_000);
+      } finally {
+        client.off("notification", onEarlyCompletion);
+      }
       const turnId = turn.turn?.id;
       if (!turnId) throw new Error("Codex turn/start returned no turn ID");
       const accepted: Omit<BridgeResult, "updated_at"> = {
@@ -249,7 +264,12 @@ export class StudyReviewTaskBridge implements vscode.Disposable {
         clearTimeout(timeout);
         settle(event.turn?.status === "completed" ? "completed" : "failed");
       });
-      if (turn.turn.status === "completed" || turn.turn.status === "failed") {
+      const captured = earlyCompletion as
+        | { threadId?: string; turn?: { id?: string; status?: string } } | null;
+      if (captured?.turn?.id === turnId) {
+        clearTimeout(timeout);
+        settle(captured.turn.status === "completed" ? "completed" : "failed");
+      } else if (turn.turn.status === "completed" || turn.turn.status === "failed") {
         clearTimeout(timeout);
         settle(turn.turn.status);
       }
