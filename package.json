@@ -42,7 +42,8 @@
     "onCommand:codexAutoResume.quotaPrimer.resetThread",
     "onCommand:codexAutoResume.inspectRecoveryInput",
     "onCommand:codexAutoResume.inspectRecoveryInteractions",
-    "onCommand:codexAutoResume.reviewRecoveryInput"
+    "onCommand:codexAutoResume.reviewRecoveryInput",
+    "onCommand:codexAutoResume.studyReviewBridge.status"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -106,6 +107,10 @@
       {
         "command": "codexAutoResume.reviewRecoveryInput",
         "title": "Codex Auto Resume: Review Recovery Input"
+      },
+      {
+        "command": "codexAutoResume.studyReviewBridge.status",
+        "title": "Codex Auto Resume: Study Review Bridge Status"
       }
     ],
     "configuration": {
@@ -226,6 +231,12 @@
           ],
           "default": "review",
           "description": "Default review requires a per-input decision when complete history contains only one user message. Opt-in replayStableUserOnly automatically replays eligible plain text after stable full snapshots; this is an evidence-based heuristic, NOT proof that execution never began. Validate your installed Codex build first."
+        },
+        "codexAutoResume.studyReviewBridge.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Opt-in local workspace .tmp/p5 study-review task bridge. Automatically starts the official bundled Codex App Server and dispatches strictly Luna Max read-only study reviews; does not answer or submit formal assessments."
         }
       }
     }

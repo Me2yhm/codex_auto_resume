@@ -3,16 +3,19 @@ import { AutoResumeController } from "./autoResumeController";
 import { diagnoseOfficialCodex } from "./diagnostics";
 import { redactedOutputChannel } from "./diagnosticRedaction";
 import { QuotaPrimerController } from "./quotaPrimerController";
+import { StudyReviewTaskBridge } from "./studyReviewTaskBridge";
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = redactedOutputChannel(vscode.window.createOutputChannel("Codex Auto Resume"));
   const controller = new AutoResumeController(context, output);
   const quotaPrimer = new QuotaPrimerController(context, output);
+  const studyBridge = new StudyReviewTaskBridge(output);
 
   context.subscriptions.push(
     output,
     controller,
     quotaPrimer,
+    studyBridge,
     vscode.commands.registerCommand("codexAutoResume.enable", () => controller.enable()),
     vscode.commands.registerCommand("codexAutoResume.disable", () => controller.disable()),
     vscode.commands.registerCommand("codexAutoResume.status", () => controller.showStatus()),
@@ -28,16 +31,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("codexAutoResume.quotaPrimer.status", () => quotaPrimer.showStatus()),
     vscode.commands.registerCommand("codexAutoResume.quotaPrimer.primeNow", () => quotaPrimer.primeNow()),
     vscode.commands.registerCommand("codexAutoResume.quotaPrimer.resetThread", () => quotaPrimer.resetPrimerThread()),
+    vscode.commands.registerCommand("codexAutoResume.studyReviewBridge.status", () => studyBridge.showStatus()),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("codexAutoResume")) {
         void controller.start();
         void quotaPrimer.start();
+        studyBridge.start();
       }
     }),
   );
 
   await controller.start();
   await quotaPrimer.start();
+  studyBridge.start();
 }
 
 export function deactivate(): void {
