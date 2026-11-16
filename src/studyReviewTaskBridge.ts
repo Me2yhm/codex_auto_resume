@@ -110,6 +110,11 @@ export class StudyReviewTaskBridge implements vscode.Disposable {
         const processing = path.join(bridgeRoot, "processing");
         const results = path.join(bridgeRoot, "results");
         if (!fs.existsSync(inbox)) continue;
+        // Python can distinguish a running VS Code bridge from a queued
+        // request without opening any inbound network port.
+        fs.writeFileSync(path.join(bridgeRoot, "bridge-ready.json"),
+          JSON.stringify({ version: 1, updated_at: new Date().toISOString() }) + "\n",
+          { encoding: "utf8", mode: 0o600 });
         fs.mkdirSync(processing, { recursive: true, mode: 0o700 });
         fs.mkdirSync(results, { recursive: true, mode: 0o700 });
         for (const filename of fs.readdirSync(inbox).sort()) {
