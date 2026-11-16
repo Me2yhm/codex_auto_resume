@@ -55,8 +55,8 @@ function writeStatus(file: string, result: Omit<BridgeResult, "updated_at">): vo
 
 function errorCode(error: unknown): string {
   const value = error instanceof Error ? error.message : String(error);
-  if (value.includes("model/list")) return "model_discovery_failed";
   if (value.includes("Luna Max")) return "luna_max_unavailable";
+  if (value.includes("model/list")) return "model_discovery_failed";
   if (value.includes("bundled Codex") || value.includes("Codex executable")
       || value.includes("Codex VS Code extension")) return "codex_executable_unavailable";
   return "codex_dispatch_failed";
