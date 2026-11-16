@@ -10,6 +10,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-study-bridge-"));
 const log = [];
 let availableModels = [];
 let clients = [];
+let completeBeforeAck = false;
 const output = { appendLine(value) { log.push(value); } };
 
 class MockCodexClient extends EventEmitter {
@@ -29,6 +30,12 @@ class MockCodexClient extends EventEmitter {
       return { thread: { id: "thread-123" } };
     }
     if (method === "turn/start") {
+      if (completeBeforeAck) {
+        this.emit("notification", "turn/completed", {
+          threadId: "thread-123",
+          turn: { id: "turn-123", status: "completed" },
+        });
+      }
       return { turn: { id: "turn-123", status: "inProgress" } };
     }
     throw new Error("Unexpected mock RPC method: " + method);
@@ -139,6 +146,19 @@ test("absent Luna Max fails closed before thread/start or turn/start", async (t)
   const client = clients[clients.length - 1];
   assert.equal(client.methods.some((m) => m.method === "thread/start"), false);
   assert.equal(client.methods.some((m) => m.method === "turn/start"), false);
+});
+
+test("a completion notification before the start response is still recorded", async (t) => {
+  const id = "c".repeat(24);
+  availableModels = [{id:"luna-max",model:"luna-max",displayName:"Luna Max"}];
+  completeBeforeAck = true;
+  queue(id);
+  const bridge = new StudyReviewTaskBridge(output);
+  t.after(() => { bridge.dispose(); completeBeforeAck = false; });
+  bridge.start();
+  await waitUntil(() => status(id)?.status === "completed");
+  assert.equal(status(id).thread_id, "thread-123");
+  assert.equal(status(id).turn_id, "turn-123");
 });
 
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
